@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "udsv4-nacc-uploader"
+version = "1.0.0"
+description = "UDSv4 NACC Uploader - Windows-first tool for uploading data to NACC Data Platform"
+readme = "README.md"
+license = {text = "Mozilla Public License 2.0"}
+authors = [
+    {name = "NACC Data Team", email = "naccdata@uw.edu"}
+]
+keywords = ["nacc", "uploader", "flywheel", "redcap", "udsv4"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps."
+]
+requires-python = ">=3.11"
+dependencies = [
+    "flywheel-sdk>=18.0.0",
+    "nacc-common @ https://github.com/naccdata/nacc-common/releases/download/v1.2.3/nacc_common-1.2.3-py3-none-any.whl",
+    "click>=8.0.0",
+    "python-dotenv>=0.19.0",
+    "pandas>=1.3.0",
+    "requests>=2.25.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.10",
+    "black>=21.0",
+    "flake8>=3.8",
+    "mypy>=0.910"
+]
+
+[project.scripts]
+udsv4-nacc-uploader = "cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/naccdata/data-platform-demos"
+Repository = "https://github.com/naccdata/data-platform-demos"
+Documentation = "https://naccdata.github.io/data-platform-demos"
+Issues = "https://github.com/naccdata/data-platform-demos/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli*", "redcap_data*", "demo*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.mypy_cache
+  | \.pytest_cache
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers --strict-config --cov=cli --cov=redcap_data"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
