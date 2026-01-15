@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def upload_to_flywheel(csv_path: Path, adcid: int, datatype: str = "form", 
-                      pipeline: str = "sandbox", test_run: bool = False) -> Dict[str, Any]:
+                      pipeline: str = "ingest") -> Dict[str, Any]:
     """Upload processed CSV data to Flywheel.
     
     Args:
@@ -35,7 +35,6 @@ def upload_to_flywheel(csv_path: Path, adcid: int, datatype: str = "form",
         adcid: ADRC site ID
         datatype: Data type (dicom, enrollment, form)
         pipeline: Pipeline type (sandbox, ingest)
-        test_run: Whether this is a test run
         
     Returns:
         Dictionary with upload results
@@ -54,16 +53,11 @@ def upload_to_flywheel(csv_path: Path, adcid: int, datatype: str = "form",
     if not os.path.getsize(csv_path) > 0:
         raise ValueError(f"CSV file is empty: {csv_path}")
     
-    # Force sandbox for test runs
-    if test_run:
-        pipeline = "sandbox"
-        logger.info("Test run mode: forcing pipeline to 'sandbox'")
-    
     # Get API key from environment
     if "FW_API_KEY" not in os.environ:
         raise ConnectionError("FW_API_KEY environment variable not found")
     
-    logger.info(f"Starting Flywheel upload (test_run: {test_run})")
+    logger.info(f"Starting Flywheel upload")
     logger.info(f"Parameters: adcid={adcid}, datatype={datatype}, pipeline={pipeline}")
     
     try:
@@ -103,7 +97,6 @@ def upload_to_flywheel(csv_path: Path, adcid: int, datatype: str = "form",
             "file_path": str(csv_path),
             "project": f"{upload_project.group}/{upload_project.label}",
             "file_size": response[0]["size"] if response else "unknown",
-            "test_run": test_run,
             "pipeline": pipeline
         }
         

@@ -107,6 +107,12 @@ def _read_csv_data(csv_path: Path) -> List[Dict[str, Any]]:
 def _process_records(records: List[Dict[str, Any]], initials: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Process records to determine upload eligibility and create REDCap updates.
     
+    Upload Eligibility Rules:
+    - Record is eligible if NOT (nacc_finalization_status = 1 AND nacc_upload_status_complete = 2)
+    - If nacc_finalization_status = 1 AND nacc_upload_status_complete = 2 → SKIP (finalized and complete)
+    - If nacc_upload_date is empty → initial upload
+    - Append transaction notes into upload_notes
+    
     Args:
         records: List of record dictionaries
         initials: User initials
@@ -116,72 +122,79 @@ def _process_records(records: List[Dict[str, Any]], initials: str) -> Tuple[List
     """
     ready_records = []
     redcap_updates = []
-    current_date = get_current_date_iso()
+    current_date = get_current_date_iso()  # YYYY-MM-DD format (date_ymd)
+    current_datestamp = datetime.now().strftime("%m-%d-%Y")  # Format: MM-DD-YYYY
     
     for record in records:
-        # Check if record is ready for upload
-        is_initial_upload = _is_initial_upload(record)
-        is_reupload_needed = _is_reupload_needed(record)
+        # Check eligibility: exclude if finalized AND complete
+        nacc_finalization_status = record.get("nacc_finalization_status", "").strip()
+        nacc_upload_status_complete = record.get("nacc_upload_status_complete", "").strip()
         
-        if is_initial_upload or is_reupload_needed:
-            ready_records.append(record.copy())
-            
-            # Create REDCap update record
-            redcap_update = {
-                "ptid": record.get("ptid", ""),
-                "redcap_event_name": record.get("redcap_event_name", ""),
-                "nacc_upload_by_initals": initials,
-                "nacc_upload_date": current_date,
-                "nacc_upload_status_complete": "1",
-                "nacc_reupload_date": current_date if is_reupload_needed else "",
-                "nacc_reupload_date_2": current_date if is_reupload_needed else ""
-            }
-            redcap_updates.append(redcap_update)
-            
-            logger.debug(f"Record {record.get('ptid')} ready for {'reupload' if is_reupload_needed else 'initial upload'}")
+        # Skip if packet is finalized (1) AND form is complete (2)
+        if nacc_finalization_status == "1" and nacc_upload_status_complete == "2":
+            logger.debug(f"Record {record.get('ptid')} skipped: finalized and complete")
+            continue
+        
+        # Record is eligible for upload
+        is_initial_upload = not record.get("nacc_upload_date", "").strip()
+        
+        ready_records.append(record.copy())
+        
+        # Create transaction note with new format
+        transaction_note = f"[{current_datestamp}] Record was uploaded successfully by {initials}"
+        
+        # Create REDCap update record
+        redcap_update = {
+            "ptid": record.get("ptid", ""),
+            "redcap_event_name": record.get("redcap_event_name", ""),
+            "upload_notes": _append_transaction_note(record.get("upload_notes", ""), transaction_note)
+        }
+        
+        # Set nacc_upload_date only for initial uploads (date_ymd format: YYYY-MM-DD)
+        if is_initial_upload:
+            redcap_update["nacc_upload_date"] = current_date
+        
+        redcap_updates.append(redcap_update)
+        
+        logger.debug(f"Record {record.get('ptid')} ready for {'initial upload' if is_initial_upload else 're-upload'}")
     
     return ready_records, redcap_updates
 
 
-def _is_initial_upload(record: Dict[str, Any]) -> bool:
-    """Check if record is an initial upload (key fields are empty)."""
-    initial_upload_fields = [
-        "nacc_upload_by_initals",
-        "nacc_upload_date",
-        "packet_finalization_date",
-        "nacc_upload_status_complete"
-    ]
-    
-    return all(not record.get(field, "").strip() for field in initial_upload_fields)
+def _append_transaction_note(existing_notes: str, new_note: str) -> str:
+    """Append a new transaction note to existing notes."""
+    if not existing_notes.strip():
+        return new_note
+    else:
+        return f"{existing_notes.strip()}; {new_note}"
 
 
-def _is_reupload_needed(record: Dict[str, Any]) -> bool:
-    """Check if record needs reupload based on status flags."""
-    # If it's an initial upload, no reupload check needed
-    if _is_initial_upload(record):
-        return False
-    
-    # Check reupload conditions
-    nacc_finalization_status = record.get("nacc_finalization_status", "").strip()
-    nacc_finalization_status_2 = record.get("nacc_finalization_status_2", "").strip()
-    reupload_status = record.get("reupload_status", "").strip()
-    
-    return (nacc_finalization_status == "0" or 
-            nacc_finalization_status_2 == "0" or 
-            reupload_status == "1")
 
 
 def _prepare_flywheel_data(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Prepare data for Flywheel upload by removing specific columns."""
+    """Prepare data for Flywheel upload by removing specific columns.
+    
+    These columns must be removed before sending via API per requirements:
+    - redcap_event_name
+    - nacc_finalization_status  
+    - nacc_upload_status_complete
+    - packet_finalization_date
+    - nacc_upload_date
+    - nacc_upload_by_initals (additional)
+    - reupload_status (additional)
+    - nacc_finalization_status_2 (additional)
+    - upload_notes (additional)
+    """
     columns_to_remove = [
         "redcap_event_name",
-        "nacc_upload_by_initals",
-        "nacc_upload_date",
         "nacc_finalization_status",
+        "nacc_upload_status_complete", 
+        "packet_finalization_date",
+        "nacc_upload_date",
+        "nacc_upload_by_initals", 
         "reupload_status",
         "nacc_finalization_status_2",
-        "packet_finalization_date",
-        "nacc_upload_status_complete"
+        "upload_notes"
     ]
     
     flywheel_records = []
@@ -243,8 +256,8 @@ def validate_input_data(csv_path: Path) -> Dict[str, Any]:
     }
     
     required_columns = [
-        "ptid", "redcap_event_name", "nacc_upload_by_initals", 
-        "nacc_upload_date", "nacc_finalization_status", "reupload_status"
+        "ptid", "redcap_event_name", "nacc_upload_date", 
+        "nacc_finalization_status", "nacc_upload_status_complete"
     ]
     
     try:

@@ -1,4 +1,4 @@
-"""UDSv4 NACC Uploader - Windows-first tool for uploading data to NACC Data Platform.
+"""UDSv4-NU (NACC Uploader) - Windows-first tool for uploading data to NACC Data Platform.
 
 This CLI tool handles fetching REDCap reports, processing data, and uploading to
 Flywheel with comprehensive logging and status tracking.
@@ -19,9 +19,9 @@ sys.path.insert(0, str(project_root))
 
 # Import modules (will be created later)
 try:
-    from redcap_data.fetcher import fetch_redcap_report
-    from redcap_data.data_processor import process_data
-    from redcap_data.uploader import upload_to_flywheel, upload_to_redcap
+    from demo.redcap_data.fetcher import fetch_redcap_report
+    from demo.redcap_data.data_processor import process_data
+    from demo.redcap_data.uploader import upload_to_flywheel, upload_to_redcap
     from demo.logger.logger import setup_logging, log_operation
     from demo.pull_errors.src.python.pull_errors import main as pull_errors_main
     from demo.pull_identifiers.src.python.pull_identifiers import main as pull_identifiers_main
@@ -42,59 +42,33 @@ CLI Commands Reference
 
 This module exposes the following top-level CLI commands via Click:
 
-- upload TARGET
-    - Uploads data to Flywheel, REDCap, or both (full-upload).
-    - TARGET choices: 'flywheel', 'redcap', 'full-upload'.
+- upload
+    - Runs the end-to-end upload pipeline by default.
     - Key options:
         - --initials (required): User initials for logging and REDCap variables.
-        - --mode: 'all' (default), 'batch', or 'single'. When 'batch' or 'single', use --ptid.
-        - --ptid: One or more PTIDs (multiple allowed). Required for batch/single modes.
-        - --pipeline: 'sandbox' (default) or 'ingest'. Forced to 'sandbox' if --test used.
-        - --adcid: Integer ADRC site ID (required for Flywheel uploads).
+        - --pipeline: 'sandbox' or 'ingest' (default: ingest).
+        - --adcid (required): Integer ADRC site ID.
         - --datatype: 'dicom', 'enrollment', or 'form' (default: form).
-        - --data-flywheel: Path to a CSV to use for Flywheel upload (optional override).
-        - --data-redcap: Path to a JSON to use for REDCap upload (optional override).
-        - --output: Output directory for logs and data files (defaults to cwd).
-        - --test: Flag for test runs (uses sandbox and skips REDCap upload).
+        - --ptid: Single or comma-separated record IDs (default: all eligible records).
+
+- fetch
+    - Pulls REDCap data (report-level) and produces the final dataset for upload.
+    - Output convention: REDCAP_NACC_UPLOAD_REPORT_{DDMMYYYY}_{HHMMSS}.csv
 
 - pull-errors
     - Pulls pipeline file errors and writes results to a time-stamped output folder.
-    - Key options:
-        - --adcid (required): Center ADCID (integer).
-        - --datatype: 'dicom', 'enrollment', or 'form' (default: form).
-        - --pipeline: 'ingest' or 'sandbox' (default: sandbox).
-        - --studyid: Study identifier (default: 'adrc').
-        - --output: Output directory (defaults to cwd).
 
-- pull-identifiers
+- pull-identifiers  
     - Pulls enrollment identifiers and saves them to a time-stamped output folder.
-    - Key options:
-        - --adcid (required): Center ADCID (integer).
-        - --pipeline: 'ingest' or 'sandbox' (default: sandbox).
-        - --studyid: Study identifier (default: 'adrc').
-        - --output: Output directory (defaults to cwd).
 
 - pull-status
     - Pulls QC status information and saves output to a time-stamped folder.
-    - Key options:
-        - --adcid (required): Center ADCID (integer).
-        - --datatype: 'dicom', 'enrollment', or 'form' (default: form).
-        - --pipeline: 'ingest' or 'sandbox' (default: sandbox).
-        - --studyid: Study identifier (default: 'adrc').
-        - --output: Output directory (defaults to cwd).
 
 - packet-finalization
-    - Placeholder command for packet finalization workflow.
-    - Key options:
-        - --output: Output directory (defaults to cwd).
+    - Handles packet finalization workflow.
 
-Other notes:
-    - main() checks for the FW_API_KEY environment variable and prints a warning if missing.
-    - Most commands create a dated/time-stamped subfolder under the provided --output path
-        and preserve the calling working directory when invoking demo functionality.
-
-This comment block replaces the shorter placeholder and documents the available commands
-and important flags to help users and maintainers quickly understand `cli.py`.
+All commands create time-stamped subfolders under the output directory following the convention:
+NACC_{COMMAND}_{DDMMYYYY}_{HHMMSS}/
 """
 
 
@@ -109,80 +83,123 @@ def get_datestamp():
 
 
 @click.group()
-@click.version_option(version=CLI_VERSION, prog_name="udsv4-nacc-uploader")
+@click.version_option(version=CLI_VERSION, prog_name="udsv4-nu")
 @click.pass_context
 def cli(ctx):
-    """UDSv4 NACC Uploader - Windows-first tool for NACC Data Platform operations.
+    """UDSv4-NU (NACC Uploader) - Windows-first tool for NACC Data Platform operations.
     
     This tool handles data fetching from REDCap, processing, and uploading to Flywheel
     with comprehensive logging and status tracking.
     
     Examples:
-        # Upload all data to Flywheel sandbox
-        udsv4-nacc-uploader upload flywheel --initials ABC --pipeline sandbox --adcid SITE123
+        # Upload all eligible records to ingest pipeline (default)
+        udsv4-nu --upload --initials JDT --pipeline ingest --adcid 123 --datatype form
         
-        # Test run with specific PTIDs
-        udsv4-nacc-uploader upload flywheel --test --initials ABC --mode batch --ptid PTID001 PTID002
+        # Upload single record to sandbox
+        udsv4-nu --upload --ptid 10001 --initials JDT --pipeline sandbox --adcid 123 --datatype form
         
-        # Pull error reports
-        udsv4-nacc-uploader pull-errors --adcid 0 --output ./reports
+        # Upload multiple records
+        udsv4-nu --upload --ptid 10001,10002,10003 --initials JDT --pipeline ingest --adcid 123 --datatype form
+        
+        # Fetch new REDCap dataset
+        udsv4-nu --fetch
     """
     ctx.ensure_object(dict)
 
 
 @cli.command()
-@click.argument('target', type=click.Choice(['flywheel', 'redcap', 'full-upload']))
-@click.option('--initials', required=True, help='User initials for logging and REDCap variables')
-@click.option('--mode', type=click.Choice(['all', 'batch', 'single']), default='all', 
-              help='Upload mode (default: all)')
-@click.option('--ptid', multiple=True, help='PTID(s) for batch/single mode')
-@click.option('--pipeline', type=click.Choice(['sandbox', 'ingest']), default='sandbox',
-              help='Flywheel pipeline type (default: sandbox)')
-@click.option('--adcid', type=int, help='ADRC site ID (required for Flywheel uploads)')
+@click.option('--upload', is_flag=True, help='Run end-to-end upload pipeline')
+@click.option('--fetch', is_flag=True, help='Fetch REDCap data and produce final dataset')
+@click.option('--pull-errors', is_flag=True, help='Pull pipeline file errors')
+@click.option('--pull-identifiers', is_flag=True, help='Pull enrollment identifiers')
+@click.option('--pull-status', is_flag=True, help='Pull QC status information')
+@click.option('--packet-finalization', is_flag=True, help='Handle packet finalization process')
+@click.option('--initials', required=False, help='User initials for logging and REDCap variables (required for --upload)')
+@click.option('--pipeline', type=click.Choice(['sandbox', 'ingest']), default='ingest',
+              help='Flywheel pipeline type (default: ingest)')
+@click.option('--adcid', type=int, help='ADRC site ID (required for --upload)')
 @click.option('--datatype', type=click.Choice(['dicom', 'enrollment', 'form']), default='form',
               help='Data type (default: form)')
-@click.option('--data-flywheel', type=click.Path(), help='Path to CSV for Flywheel upload')
-@click.option('--data-redcap', type=click.Path(), help='Path to JSON for REDCap upload')
+@click.option('--ptid', help='Record ID(s) - single value or comma-separated list (default: all records)')
 @click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR),
               help='Output directory for logs and data files')
-@click.option('--test', is_flag=True, help='Test run - uses Flywheel sandbox, no REDCap upload')
 @click.pass_context
-def upload(ctx, target, initials, mode, ptid, pipeline, adcid, datatype, 
-           data_flywheel, data_redcap, output, test):
-    """Upload data to Flywheel and/or REDCap.
-    
-    TARGET can be 'flywheel', 'redcap', or 'full-upload' for both.
+def main_command(ctx, upload, fetch, pull_errors, pull_identifiers, pull_status, 
+                packet_finalization, initials, pipeline, adcid, datatype, ptid, output):
+    """Main command handler for UDSv4-NU operations.
     
     Examples:
-        # Flywheel upload (all mode, default)
-        udsv4-nacc-uploader upload flywheel --initials ABC --pipeline sandbox --adcid SITE123
+        # Upload all eligible records (default)
+        udsv4-nu --upload --initials JDT --pipeline ingest --adcid 123 --datatype form
         
-        # REDCap upload (all mode, default)
-        udsv4-nacc-uploader upload redcap --initials ABC
+        # Upload single record
+        udsv4-nu --upload --ptid 10001 --initials JDT --pipeline sandbox --adcid 123 --datatype form
         
-        # Test run with specific PTIDs
-        udsv4-nacc-uploader upload flywheel --test --initials ABC --mode batch --ptid PTID001 PTID002
+        # Upload multiple records
+        udsv4-nu --upload --ptid 10001,10002,10003 --initials JDT --pipeline ingest --adcid 123 --datatype form
+        
+        # Fetch new REDCap dataset
+        udsv4-nu --fetch
+        
+        # Check packet finalization
+        udsv4-nu --packet-finalization
     """
-    # Validate arguments
-    if target in ['flywheel', 'full-upload'] and not adcid:
-        click.echo("Error: --adcid is required for Flywheel uploads", err=True)
-        sys.exit(1)
-        
-    if mode in ['batch', 'single'] and not ptid:
-        click.echo(f"Error: --ptid is required for mode '{mode}'", err=True)
-        sys.exit(1)
-        
-    if mode == 'single' and len(ptid) != 1:
-        click.echo("Error: --mode single requires exactly one PTID", err=True)
-        sys.exit(1)
-        
-    if test and target == 'redcap':
-        click.echo("Warning: --test flag is not applicable to REDCap uploads", err=True)
+    # Count how many command flags are set
+    commands = [upload, fetch, pull_errors, pull_identifiers, pull_status, packet_finalization]
+    command_count = sum(bool(cmd) for cmd in commands)
     
-    # Force sandbox for test runs
-    if test:
-        pipeline = 'sandbox'
+    if command_count == 0:
+        click.echo("Error: No command specified. Use --help for available commands.", err=True)
+        sys.exit(1)
+    elif command_count > 1:
+        click.echo("Error: Only one command can be specified at a time.", err=True)
+        sys.exit(1)
     
+    # Validate upload command requirements
+    if upload:
+        if not initials:
+            click.echo("Error: --initials is required for --upload command", err=True)
+            sys.exit(1)
+        if not adcid:
+            click.echo("Error: --adcid is required for --upload command", err=True)
+            sys.exit(1)
+        
+        # Handle record selection logic - defaults to all records
+        ptids = []
+        if ptid:
+            # Split by comma and strip whitespace
+            ptids = [p.strip() for p in ptid.split(',')]
+        # If not specified, defaults to all eligible records (empty list)
+        
+        _handle_upload(initials, pipeline, adcid, datatype, ptids, output)
+    
+    elif fetch:
+        _handle_fetch(output)
+    
+    elif pull_errors:
+        if not adcid:
+            click.echo("Error: --adcid is required for --pull-errors command", err=True)
+            sys.exit(1)
+        _handle_pull_errors(adcid, datatype, pipeline, output)
+    
+    elif pull_identifiers:
+        if not adcid:
+            click.echo("Error: --adcid is required for --pull-identifiers command", err=True)
+            sys.exit(1)
+        _handle_pull_identifiers(adcid, pipeline, output)
+    
+    elif pull_status:
+        if not adcid:
+            click.echo("Error: --adcid is required for --pull-status command", err=True)
+            sys.exit(1)
+        _handle_pull_status(adcid, datatype, pipeline, output)
+    
+    elif packet_finalization:
+        _handle_packet_finalization(output)
+
+
+def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
+    """Handle the upload command workflow."""
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -190,57 +207,50 @@ def upload(ctx, target, initials, mode, ptid, pipeline, adcid, datatype,
     try:
         logger = setup_logging(initials, output_path)
         log_operation(logger, "upload_start", {
-            "target": target,
-            "mode": mode,
-            "ptids": list(ptid) if ptid else [],
+            "ptids": ptids,
             "pipeline": pipeline,
             "adcid": adcid,
-            "datatype": datatype,
-            "test_run": test
+            "datatype": datatype
         })
     except NameError:
         click.echo("Warning: Logging module not yet implemented", err=True)
         logger = None
     
     try:
-        if target in ['flywheel', 'full-upload']:
-            # Fetch data from REDCap
-            click.echo(f"Fetching REDCap data (mode: {mode})...")
-            try:
-                raw_data_path = fetch_redcap_report(mode, list(ptid) if ptid else [])
-                click.echo(f"Data fetched: {raw_data_path}")
-            except NameError:
-                click.echo("Error: REDCap fetcher not yet implemented", err=True)
-                sys.exit(1)
-            
-            # Process data
-            click.echo("Processing data...")
-            try:
-                csv_path, json_path = process_data(raw_data_path, initials, output_path)
-                click.echo(f"Data processed: CSV={csv_path}, JSON={json_path}")
-            except NameError:
-                click.echo("Error: Data processor not yet implemented", err=True)
-                sys.exit(1)
-            
-            # Upload to Flywheel
-            click.echo(f"Uploading to Flywheel ({'TEST MODE' if test else 'LIVE MODE'})...")
-            try:
-                upload_result = upload_to_flywheel(
-                    csv_path, adcid, datatype, pipeline, test
-                )
-                click.echo(f"Flywheel upload completed: {upload_result}")
-            except NameError:
-                click.echo("Error: Flywheel uploader not yet implemented", err=True)
-                sys.exit(1)
+        # Fetch data from REDCap
+        click.echo(f"Fetching REDCap data...")
+        try:
+            raw_data_path = fetch_redcap_report(ptids)
+            click.echo(f"Data fetched: {raw_data_path}")
+        except NameError:
+            click.echo("Error: REDCap fetcher not yet implemented", err=True)
+            sys.exit(1)
         
-        if target in ['redcap', 'full-upload'] and not test:
-            # Upload to REDCap (not for test runs)
-            click.echo("Uploading status to REDCap...")
-            try:
-                redcap_result = upload_to_redcap(json_path if 'json_path' in locals() else data_redcap)
-                click.echo(f"REDCap upload completed: {redcap_result}")
-            except NameError:
-                click.echo("Warning: REDCap uploader not yet implemented", err=True)
+        # Process data
+        click.echo("Processing data...")
+        try:
+            csv_path, json_path = process_data(raw_data_path, initials, output_path)
+            click.echo(f"Data processed: CSV={csv_path}, JSON={json_path}")
+        except NameError:
+            click.echo("Error: Data processor not yet implemented", err=True)
+            sys.exit(1)
+        
+        # Upload to Flywheel
+        click.echo(f"Uploading to Flywheel (pipeline: {pipeline})...")
+        try:
+            upload_result = upload_to_flywheel(csv_path, adcid, datatype, pipeline)
+            click.echo(f"Flywheel upload completed: {upload_result}")
+        except NameError:
+            click.echo("Error: Flywheel uploader not yet implemented", err=True)
+            sys.exit(1)
+        
+        # Upload status to REDCap
+        click.echo("Uploading status to REDCap...")
+        try:
+            redcap_result = upload_to_redcap(json_path)
+            click.echo(f"REDCap upload completed: {redcap_result}")
+        except NameError:
+            click.echo("Warning: REDCap uploader not yet implemented", err=True)
         
         if logger:
             log_operation(logger, "upload_complete", {"success": True})
@@ -253,17 +263,26 @@ def upload(ctx, target, initials, mode, ptid, pipeline, adcid, datatype,
         sys.exit(1)
 
 
-@cli.command('pull-errors')
-@click.option('--adcid', type=int, required=True, help='Center ADCID')
-@click.option('--datatype', type=click.Choice(['dicom', 'enrollment', 'form']), 
-              default='form', help='Data type (default: form)')
-@click.option('--pipeline', type=click.Choice(['ingest', 'sandbox']), 
-              default='sandbox', help='Pipeline type (default: sandbox)')
-@click.option('--studyid', default='adrc', help='Study ID (default: adrc)')
-@click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR),
-              help='Output directory')
-def pull_errors(adcid, datatype, pipeline, studyid, output):
-    """Pull pipeline file errors."""
+def _handle_fetch(output):
+    """Handle the fetch command."""
+    output_path = Path(output)
+    timestamp = get_timestamp()
+    datestamp = get_datestamp()
+    
+    click.echo("Fetching REDCap data...")
+    try:
+        report_path = fetch_redcap_report([])  # Empty list means all records
+        click.echo(f"REDCap data fetched and saved to: {report_path}")
+    except NameError:
+        click.echo("Error: REDCap fetcher not yet implemented", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error fetching data: {e}", err=True)
+        sys.exit(1)
+
+
+def _handle_pull_errors(adcid, datatype, pipeline, output):
+    """Handle the pull-errors command."""
     output_path = Path(output)
     timestamp = get_timestamp()
     datestamp = get_datestamp()
@@ -288,15 +307,8 @@ def pull_errors(adcid, datatype, pipeline, studyid, output):
         os.chdir(original_cwd)
 
 
-@cli.command('pull-identifiers')
-@click.option('--adcid', type=int, required=True, help='Center ADCID')
-@click.option('--pipeline', type=click.Choice(['ingest', 'sandbox']), 
-              default='sandbox', help='Pipeline type (default: sandbox)')
-@click.option('--studyid', default='adrc', help='Study ID (default: adrc)')
-@click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR),
-              help='Output directory')
-def pull_identifiers(adcid, pipeline, studyid, output):
-    """Pull enrollment identifiers."""
+def _handle_pull_identifiers(adcid, pipeline, output):
+    """Handle the pull-identifiers command."""
     output_path = Path(output)
     timestamp = get_timestamp()
     datestamp = get_datestamp()
@@ -320,17 +332,8 @@ def pull_identifiers(adcid, pipeline, studyid, output):
         os.chdir(original_cwd)
 
 
-@cli.command('pull-status')
-@click.option('--adcid', type=int, required=True, help='Center ADCID')
-@click.option('--datatype', type=click.Choice(['dicom', 'enrollment', 'form']), 
-              default='form', help='Data type (default: form)')
-@click.option('--pipeline', type=click.Choice(['ingest', 'sandbox']), 
-              default='sandbox', help='Pipeline type (default: sandbox)')
-@click.option('--studyid', default='adrc', help='Study ID (default: adrc)')
-@click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR),
-              help='Output directory')
-def pull_status(adcid, datatype, pipeline, studyid, output):
-    """Pull QC status information."""
+def _handle_pull_status(adcid, datatype, pipeline, output):
+    """Handle the pull-status command."""
     output_path = Path(output)
     timestamp = get_timestamp()
     datestamp = get_datestamp()
@@ -354,11 +357,8 @@ def pull_status(adcid, datatype, pipeline, studyid, output):
         os.chdir(original_cwd)
 
 
-@cli.command('packet-finalization')
-@click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR),
-              help='Output directory')
-def packet_finalization(output):
-    """Handle packet finalization process."""
+def _handle_packet_finalization(output):
+    """Handle the packet-finalization command."""
     output_path = Path(output)
     timestamp = get_timestamp()
     datestamp = get_datestamp()
@@ -370,7 +370,6 @@ def packet_finalization(output):
     
     # Placeholder for packet finalization logic
     click.echo("Packet finalization functionality will be implemented here")
-
 
 def main():
     """Main entry point for the CLI."""
