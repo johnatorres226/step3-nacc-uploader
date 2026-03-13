@@ -170,5 +170,3 @@ cython_debug/
 # Output .csv in top-level directory
 /*.csv
 test_logs/
-logs/
-backups/
