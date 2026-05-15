@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  # PRs to main must update changelog and version
+  pr-to-main-checks:
+    name: Changelog & Version Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check CHANGELOG.md was updated
+        run: |
+          echo "Checking if CHANGELOG.md was modified..."
+          git diff --name-only origin/main...HEAD | grep -q "CHANGELOG.md" || {
+            echo "❌ CHANGELOG.md was not updated"
+            echo "Please update CHANGELOG.md with details of your changes"
+            exit 1
+          }
+          echo "✅ CHANGELOG.md was updated"
+
+      - name: Check version was updated
+        run: |
+          echo "Checking if version was updated in pyproject.toml..."
+          git diff origin/main...HEAD -- pyproject.toml | grep -q "^+version" || {
+            echo "❌ Version was not updated in pyproject.toml"
+            echo "Please bump the version number appropriately"
+            exit 1
+          }
+          echo "✅ Version was updated in pyproject.toml"
+
+      - name: Validate version format
+        run: |
+          VERSION=$(grep -E '^version = ' pyproject.toml | cut -d '"' -f2)
+          echo "Current version: $VERSION"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "❌ Version format is invalid"
+            echo "Expected format: MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          fi
+          echo "✅ Version format is valid"
+
+  # Code quality checks
+  lint:
+    name: Lint (Ruff)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Run Ruff lint
+        run: ruff check src
+
+      - name: Run Ruff format check
+        run: ruff format --check src
+
+  # Type checking
+  type-check:
+    name: Type Check (mypy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install mypy types-requests types-python-dateutil
+
+      - name: Run mypy
+        run: mypy --config-file mypy.ini --explicit-package-bases src
+
+  # Verify package builds correctly
+  build-verify:
+    name: Build Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-build-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            venv-build-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: poetry install --with dev --extras flywheel
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf dist/ build/ *.egg-info
+          echo "Cleaned previous build artifacts"
+
+      - name: Build package
+        run: poetry build
+
+      - name: Test package installation
+        run: |
+          pip install "dist/*.whl[flywheel]"
+          udsv4-nu --version
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
+          retention-days: 7

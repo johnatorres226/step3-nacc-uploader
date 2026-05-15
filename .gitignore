@@ -170,3 +170,16 @@ cython_debug/
 # Output .csv in top-level directory
 /*.csv
 test_logs/
+
+# Runtime output, logs, and data (never ship these)
+output/
+logs/
+data/
+backups/
+telemetry/
+
+# REDCap upload status files (contain record-level data)
+redcap-upload-ready-data/*.json
+
+# Workspace-specific files
+*.code-workspace
