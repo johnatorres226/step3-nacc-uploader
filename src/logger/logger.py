@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import os
 
+# Tracks the active run's logs directory; set by setup_logging()
+_active_logs_dir: Optional[Path] = None
+
 
 def get_timestamp() -> str:
     """Get current timestamp in HHMMSS format."""
@@ -19,8 +22,8 @@ def get_timestamp() -> str:
 
 
 def get_datestamp() -> str:
-    """Get current date in DDMMYYYY format."""
-    return datetime.now().strftime("%d%m%Y")
+    """Get current date in DDMMMYYYY format."""
+    return datetime.now().strftime("%d%b%Y").upper()
 
 
 def setup_logging(initials: str, output_dir: Path, log_level: str = "INFO") -> logging.Logger:
@@ -34,9 +37,12 @@ def setup_logging(initials: str, output_dir: Path, log_level: str = "INFO") -> l
     Returns:
         Configured logger instance
     """
+    global _active_logs_dir
+
     # Create logs directory
     logs_dir = output_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    _active_logs_dir = logs_dir
     
     # Set up main logger
     logger = logging.getLogger("udsv4_nacc_uploader")
@@ -123,9 +129,9 @@ def _initialize_comprehensive_log(log_path: Path, initials: str) -> None:
 
 def _update_comprehensive_log(operation: str, data: Dict[str, Any]) -> None:
     """Update the comprehensive JSON log with new operation."""
-    # Update main log
-    logs_dir = Path.cwd() / "logs"
-    logs_dir.mkdir(exist_ok=True)
+    # Write to the active run's logs dir when available, else root logs/
+    logs_dir = _active_logs_dir if _active_logs_dir is not None else Path.cwd() / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     comprehensive_log_path = logs_dir / "UPLOAD_LOG_COMPREHENSIVE.json"
     
     _append_to_json_log(comprehensive_log_path, operation, data)

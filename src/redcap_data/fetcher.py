@@ -22,17 +22,18 @@ def get_timestamp() -> str:
 
 
 def get_datestamp() -> str:
-    """Get current date in DDMMYYYY format."""
-    return datetime.now().strftime("%d%m%Y")
+    """Get current date in DDMMMYYYY format."""
+    return datetime.now().strftime("%d%b%Y").upper()
 
 
-def fetch_redcap_report(ptids: Optional[List[str]] = None) -> Path:
+def fetch_redcap_report(ptids: Optional[List[str]] = None, output_dir: Path = None) -> Path:
     """Fetch REDCap report and apply filtering based on PTIDs.
     
     Uses NACC_REDCAP_REPORT_ID from environment to fetch specific report.
     
     Args:
         ptids: List of PTIDs for filtering. If empty or None, fetches all eligible records
+        output_dir: Directory where the fetched CSV will be saved. Required.
         
     Returns:
         Path to the fetched CSV file
@@ -65,11 +66,12 @@ def fetch_redcap_report(ptids: Optional[List[str]] = None) -> Path:
     # Generate output filename following convention
     datestamp = get_datestamp()
     timestamp = get_timestamp()
-    filename = f"REDCAP_NACC_UPLOAD_REPORT_{datestamp}_{timestamp}.csv"
+    filename = f"REDCAP_NACC_UPLOAD_REPORT_{datestamp}-{timestamp}.csv"
     
-    # Create data directory if it doesn't exist
-    data_dir = Path.cwd() / "data"
-    data_dir.mkdir(exist_ok=True)
+    if output_dir is None:
+        raise ValueError("output_dir is required; pass the run's output path")
+    data_dir = Path(output_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
     
     output_path = data_dir / filename
     

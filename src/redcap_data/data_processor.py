@@ -21,8 +21,8 @@ def get_timestamp() -> str:
 
 
 def get_datestamp() -> str:
-    """Get current date in DDMMYYYY format."""
-    return datetime.now().strftime("%d%m%Y")
+    """Get current date in DDMMMYYYY format."""
+    return datetime.now().strftime("%d%b%Y").upper()
 
 
 def get_current_date_iso() -> str:
@@ -51,13 +51,13 @@ def process_data(input_csv_path: Path, initials: str, output_dir: Path) -> Tuple
     # Create run-scoped data folder
     datestamp = get_datestamp()
     timestamp = get_timestamp()
-    data_folder = output_dir / f"NACC_UPLOAD_{datestamp}_{timestamp}"
+    data_folder = output_dir / f"NACC_UPLOAD_{datestamp}-{timestamp}"
     data_folder.mkdir(parents=True, exist_ok=True)
-    
+
     # Define output paths - UDS submission format: testsubmission-uds.csv
-    csv_output_path = data_folder / f"{datestamp}{timestamp}-uds.csv"
-    json_output_path = data_folder / f"NACC_UPLOAD_{datestamp}_{timestamp}_status.json"
-    ready_records_path = data_folder / f"NACC_READYRECORDS_{datestamp}_{timestamp}.csv"
+    csv_output_path = data_folder / f"{datestamp}-{timestamp}-uds.csv"
+    json_output_path = data_folder / f"NACC_UPLOAD_{datestamp}-{timestamp}_status.json"
+    ready_records_path = data_folder / f"NACC_READYRECORDS_{datestamp}-{timestamp}.csv"
     
     # No need to create separate JSON directory - using data_folder
     
