@@ -2,7 +2,7 @@
 
 import pytest
 from click.testing import CliRunner
-from cli.cli import cli
+from src.cli.cli import cli
 
 
 class TestCLI:
@@ -22,7 +22,7 @@ class TestCLI:
         """Test CLI version command."""
         result = self.runner.invoke(cli, ['--version'])
         assert result.exit_code == 0
-        assert '1.0.0' in result.output
+        from src.cli.cli import CLI_VERSION; assert CLI_VERSION in result.output
     
     def test_upload_validation(self):
         """Test that upload validates required fields."""

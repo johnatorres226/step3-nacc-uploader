@@ -1,10 +1,15 @@
 """Tests for REDCap fetcher module."""
 
+import os
 import pytest
 from pathlib import Path
-from demo.redcap_data.fetcher import fetch_redcap_report
+from src.redcap_data.fetcher import fetch_redcap_report
 
 
+@pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_REDCAP_TESTS"),
+    reason="live REDCap API test; set RUN_LIVE_REDCAP_TESTS=1 to run",
+)
 class TestFetchRedcapReport:
     """Test REDCap report fetching."""
     

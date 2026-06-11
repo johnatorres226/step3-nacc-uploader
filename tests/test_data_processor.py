@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 from datetime import datetime
-from demo.redcap_data.data_processor import (
+from src.redcap_data.data_processor import (
     _process_records,
     _append_transaction_note,
     validate_input_data
