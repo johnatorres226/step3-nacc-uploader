@@ -24,10 +24,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-logger = logging.getLogger(__name__)
+from src.redcap_data.qc_gates import (
+    ERRORS_CSV_REQUIRED_COLUMNS,
+    field,
+    note_stamp,
+    parse_two_gate_finalized,
+    today_iso,
+    validate_csv_columns,
+)
 
-FINALIZATION_STAGE = "form-qc-coordinator"
-CHECKER_STAGE = "form-qc-checker"
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -43,14 +49,15 @@ def parse_error_counts(errors_csv_path: Path) -> Dict[str, Dict[str, Any]]:
     Returns:
         Dict keyed by ptid → {"error_count": int, "visitdate": str}
     """
+    validate_csv_columns(errors_csv_path, ERRORS_CSV_REQUIRED_COLUMNS, "pull-errors")
     result: Dict[str, Dict[str, Any]] = {}
     with open(errors_csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            ptid = row.get("ptid", "").strip()
+            ptid = field(row, "ptid")
             if not ptid:
                 continue
-            visitdate = row.get("date", "").strip()
+            visitdate = field(row, "date")
             if ptid not in result:
                 result[ptid] = {"error_count": 0, "visitdate": visitdate}
             result[ptid]["error_count"] += 1
@@ -61,43 +68,10 @@ def parse_error_counts(errors_csv_path: Path) -> Dict[str, Dict[str, Any]]:
 def parse_fw_finalized(status_csv_path: Path) -> List[Dict[str, str]]:
     """Return records where form-qc-checker AND form-qc-coordinator both PASS.
 
-    Uses the same two-stage logic as finalization_processor so that checkout
-    and full packet-finalization stay consistent.
-
-    Returns:
-        List of dicts with keys: ptid, adcid, module, visitdate.
+    Thin alias over qc_gates.parse_two_gate_finalized() — the single
+    implementation of the two-gate rule shared with packet finalization.
     """
-    packet_stages: Dict[Tuple[str, str], Dict[str, str]] = {}
-    packet_meta: Dict[Tuple[str, str], Dict[str, str]] = {}
-
-    with open(status_csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            stage = row.get("stage", "").strip()
-            status = row.get("status", "").strip().upper()
-            ptid = row.get("ptid", "").strip()
-            visitdate = row.get("visitdate", "").strip()
-            if not ptid or not visitdate:
-                continue
-            key = (ptid, visitdate)
-            if key not in packet_stages:
-                packet_stages[key] = {}
-                packet_meta[key] = {
-                    "ptid": ptid,
-                    "adcid": row.get("adcid", "").strip(),
-                    "module": row.get("module", "").strip(),
-                    "visitdate": visitdate,
-                }
-            if stage in (FINALIZATION_STAGE, CHECKER_STAGE):
-                packet_stages[key][stage] = status
-
-    finalized: List[Dict[str, str]] = []
-    for key, stages in packet_stages.items():
-        if stages.get(CHECKER_STAGE) == "PASS" and stages.get(FINALIZATION_STAGE) == "PASS":
-            finalized.append(packet_meta[key])
-
-    logger.info("Found %d FW-finalized records in %s", len(finalized), status_csv_path.name)
-    return finalized
+    return parse_two_gate_finalized(status_csv_path)
 
 
 # ---------------------------------------------------------------------------
@@ -125,19 +99,18 @@ def build_checkout_results(
         - error_rows: fw_finalized=NO rows (one per errored ptid)
         - error_note_records: REDCap payloads for error records that are in NACC_READYRECORDS
     """
-    today = datetime.now().strftime("%Y-%m-%d")
-    datestamp = datetime.now().strftime("%m-%d-%Y")
-    new_note = f"[{datestamp}] Upload checkout PASS | Processed by {initials}"
-    error_note = f"[{datestamp}] Upload checkout | Processed by {initials}"
+    today = today_iso()
+    new_note = f"[{note_stamp()}] Upload checkout PASS | Processed by {initials}"
+    error_note = f"[{note_stamp()}] Upload checkout | Processed by {initials}"
 
     # REDCap report index keyed by (ptid, visitdate)
     redcap_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for rec in redcap_records:
-        ptid = rec.get("ptid", "").strip()
-        visitdate = rec.get("visitdate", "").strip()
+        ptid = field(rec, "ptid")
+        visitdate = field(rec, "visitdate")
         if ptid and visitdate:
             key = (ptid, visitdate)
-            if key not in redcap_index or rec.get("redcap_repeat_instance", "").strip():
+            if key not in redcap_index or field(rec, "redcap_repeat_instance"):
                 redcap_index[key] = rec
 
     summary_rows: List[Dict[str, Any]] = []
@@ -154,7 +127,7 @@ def build_checkout_results(
             action = "skipped"
             skip_reason = "not_in_redcap_report"
             msg = f"PASS in FW — skipped (not_in_redcap_report)"
-        elif redcap_rec.get("nacc_finalization_status", "").strip() == "1":
+        elif field(redcap_rec, "nacc_finalization_status") == "1":
             action = "skipped"
             skip_reason = "already_finalized_in_redcap"
             msg = "PASS in FW — skipped (already_finalized_in_redcap)"
@@ -163,7 +136,7 @@ def build_checkout_results(
             skip_reason = ""
             msg = "PASS — queued for finalization (nacc_finalization_status=1)"
 
-            existing_notes = redcap_rec.get("upload_notes", "").strip()
+            existing_notes = field(redcap_rec, "upload_notes")
             update: Dict[str, Any] = {
                 "ptid": ptid,
                 "redcap_event_name": redcap_rec.get("redcap_event_name", "udsvisit_arm_1"),
@@ -173,7 +146,7 @@ def build_checkout_results(
             }
             if existing_notes:
                 update["upload_notes"] = f"{existing_notes}; {new_note}"
-            repeat_instance = redcap_rec.get("redcap_repeat_instance", "").strip()
+            repeat_instance = field(redcap_rec, "redcap_repeat_instance")
             if repeat_instance:
                 update["redcap_repeat_instance"] = repeat_instance
             update_records.append(update)
@@ -214,14 +187,14 @@ def build_checkout_results(
         # Build a REDCap note update for error records that are in NACC_READYRECORDS
         redcap_rec = redcap_index.get((ptid, visitdate))
         if redcap_rec:
-            existing_notes = redcap_rec.get("upload_notes", "").strip()
+            existing_notes = field(redcap_rec, "upload_notes")
             note_text = f"FW QC: {count} error(s) found | {error_note}"
             error_update: Dict[str, Any] = {
                 "ptid": ptid,
                 "redcap_event_name": redcap_rec.get("redcap_event_name", "udsvisit_arm_1"),
                 "upload_notes": f"{existing_notes}; {note_text}" if existing_notes else note_text,
             }
-            repeat_instance = redcap_rec.get("redcap_repeat_instance", "").strip()
+            repeat_instance = field(redcap_rec, "redcap_repeat_instance")
             if repeat_instance:
                 error_update["redcap_repeat_instance"] = repeat_instance
             error_note_records.append(error_update)
@@ -298,13 +271,12 @@ def run_upload_checkout(
     """
     datestamp = datetime.now().strftime("%d%b%Y").upper()
     timestamp = datetime.now().strftime("%H%M%S")
-    today_iso = datetime.now().strftime("%Y-%m-%d")
     stamp = f"{datestamp}-{timestamp}"
 
     folder = output_dir / f"NACC_UPLOAD_CHECKOUT_{stamp}"
     folder.mkdir(parents=True, exist_ok=True)
 
-    summary_path = folder / f"checkout-summary-{today_iso}.csv"
+    summary_path = folder / f"checkout-summary-{today_iso()}.csv"
     updates_path = folder / f"NACC_UPLOAD_CHECKOUT_{stamp}_updates.json"
 
     error_counts = parse_error_counts(errors_csv_path)

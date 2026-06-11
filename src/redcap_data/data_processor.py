@@ -30,29 +30,39 @@ def get_current_date_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def process_data(input_csv_path: Path, initials: str, output_dir: Path) -> Tuple[Path, Path]:
+def process_data(input_csv_path: Path, initials: str, output_dir: Path,
+                 run_dir: Path = None) -> Tuple[Path, Path]:
     """Process REDCap data and create upload-ready artifacts.
-    
+
     Args:
         input_csv_path: Path to the fetched REDCap CSV
         initials: User initials for logging and REDCap variables
-        output_dir: Base output directory
-        
+        output_dir: Base output directory (used when run_dir is not provided)
+        run_dir: Pre-created run folder (NACC_UPLOAD_{stamp}). When provided,
+                 all outputs land here instead of a new subfolder being created.
+
     Returns:
         Tuple of (CSV path for Flywheel, JSON path for REDCap)
-        
+
     Raises:
         FileNotFoundError: If input CSV doesn't exist
         ValueError: If data processing fails
     """
     if not input_csv_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_csv_path}")
-    
-    # Create run-scoped data folder
-    datestamp = get_datestamp()
-    timestamp = get_timestamp()
-    data_folder = output_dir / f"NACC_UPLOAD_{datestamp}-{timestamp}"
-    data_folder.mkdir(parents=True, exist_ok=True)
+
+    if run_dir is not None:
+        data_folder = Path(run_dir)
+        data_folder.mkdir(parents=True, exist_ok=True)
+        # Derive stamp from folder name: NACC_UPLOAD_{DDMMMYYYY}-{HHMMSS}
+        folder_stamp = data_folder.name.replace("NACC_UPLOAD_", "")
+        datestamp, timestamp = folder_stamp.rsplit("-", 1)
+    else:
+        # Create run-scoped data folder with its own stamp
+        datestamp = get_datestamp()
+        timestamp = get_timestamp()
+        data_folder = output_dir / f"NACC_UPLOAD_{datestamp}-{timestamp}"
+        data_folder.mkdir(parents=True, exist_ok=True)
 
     # Define output paths - UDS submission format: testsubmission-uds.csv
     csv_output_path = data_folder / f"{datestamp}-{timestamp}-uds.csv"
@@ -122,7 +132,7 @@ def _process_records(records: List[Dict[str, Any]], initials: str) -> Tuple[List
     ready_records = []
     redcap_updates = []
     current_date = get_current_date_iso()  # YYYY-MM-DD format (date_ymd)
-    current_datestamp = datetime.now().strftime("%m-%d-%Y")  # Format: MM-DD-YYYY
+    current_datestamp = get_current_date_iso()  # one ISO date policy in notes and payloads
     
     for record in records:
         # Check eligibility: exclude if finalized AND complete

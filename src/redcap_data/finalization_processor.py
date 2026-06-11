@@ -18,72 +18,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-logger = logging.getLogger(__name__)
+from src.redcap_data.qc_gates import (
+    CHECKER_STAGE,
+    FINALIZATION_STAGE,
+    field,
+    note_stamp,
+    parse_two_gate_finalized,
+    today_iso,
+)
 
-FINALIZATION_STAGE = "form-qc-coordinator"
-CHECKER_STAGE = "form-qc-checker"
+logger = logging.getLogger(__name__)
 
 
 def parse_finalized_records(status_csv_path: Path) -> List[Dict[str, str]]:
     """Parse QC status CSV and return records where both QC stages passed.
 
-    A packet qualifies only when form-qc-checker = PASS AND
-    form-qc-coordinator = PASS. Packets where form-qc-checker = FAIL are
-    excluded even if the coordinator stage passed.
-
-    Args:
-        status_csv_path: Path to the QC status CSV produced by pull_status.
-
-    Returns:
-        List of dicts with keys: ptid, adcid, module, visitdate.
+    Thin alias over qc_gates.parse_two_gate_finalized() — the single
+    implementation of the two-gate rule shared with upload checkout.
     """
-    # Collect per-packet stage results keyed by (ptid, visitdate)
-    packet_stages: Dict[Tuple[str, str], Dict[str, str]] = {}
-    packet_meta: Dict[Tuple[str, str], Dict[str, str]] = {}
-
-    with open(status_csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            stage = row.get("stage", "").strip()
-            status = row.get("status", "").strip().upper()
-            key = (row["ptid"].strip(), row["visitdate"].strip())
-            if key not in packet_stages:
-                packet_stages[key] = {}
-                packet_meta[key] = {
-                    "ptid": row["ptid"].strip(),
-                    "adcid": row["adcid"].strip(),
-                    "module": row["module"].strip(),
-                    "visitdate": row["visitdate"].strip(),
-                }
-            if stage in (FINALIZATION_STAGE, CHECKER_STAGE):
-                packet_stages[key][stage] = status
-
-    finalized: List[Dict[str, str]] = []
-    excluded_checker_fail = 0
-
-    for key, stages in packet_stages.items():
-        coordinator_pass = stages.get(FINALIZATION_STAGE) == "PASS"
-        checker_pass = stages.get(CHECKER_STAGE) == "PASS"
-
-        if coordinator_pass and checker_pass:
-            finalized.append(packet_meta[key])
-        elif coordinator_pass and not checker_pass:
-            excluded_checker_fail += 1
-            logger.warning(
-                "Excluded from finalization: ptid=%s visitdate=%s — "
-                "form-qc-coordinator=PASS but form-qc-checker=%s",
-                key[0],
-                key[1],
-                stages.get(CHECKER_STAGE, "missing"),
-            )
-
-    logger.info(
-        "Found %d finalized records (coordinator=PASS + checker=PASS); "
-        "%d excluded due to checker=FAIL",
-        len(finalized),
-        excluded_checker_fail,
-    )
-    return finalized
+    return parse_two_gate_finalized(status_csv_path)
 
 
 def build_finalization_updates(
@@ -113,21 +66,19 @@ def build_finalization_updates(
     Returns:
         Tuple of (update_records, skipped_records).
     """
-    today = datetime.now().strftime("%Y-%m-%d")
-    datestamp = datetime.now().strftime("%m-%d-%Y")
-    new_note = f"[{datestamp}] Packet finalized by NACC | Processed by {initials}"
+    today = today_iso()
+    new_note = f"[{note_stamp()}] Packet finalized by NACC | Processed by {initials}"
 
     # Build lookup index: (ptid, visitdate) -> redcap_record
     redcap_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for rec in redcap_records:
-        ptid = rec.get("ptid", "").strip()
-        visitdate = rec.get("visitdate", "").strip()
+        ptid = field(rec, "ptid")
+        visitdate = field(rec, "visitdate")
         if ptid and visitdate:
             key = (ptid, visitdate)
             if key in redcap_index:
                 # If duplicate (shouldn't happen), keep the one with a repeat instance
-                existing = redcap_index[key]
-                if rec.get("redcap_repeat_instance", "").strip():
+                if field(rec, "redcap_repeat_instance"):
                     redcap_index[key] = rec
             else:
                 redcap_index[key] = rec
@@ -160,7 +111,7 @@ def build_finalization_updates(
             continue
 
         # Skip if already marked finalized in REDCap
-        if redcap_rec.get("nacc_finalization_status", "").strip() == "1":
+        if field(redcap_rec, "nacc_finalization_status") == "1":
             logger.debug("Already finalized in REDCap: ptid=%s visitdate=%s", ptid, visitdate)
             skipped_records.append(
                 {
@@ -180,7 +131,7 @@ def build_finalization_updates(
         # in REDCap with an empty-prefixed string.
         # Only append when we can confirm the existing text (report provides non-empty value).
         # Add upload_notes to the REDCap report if you want the finalization event logged there.
-        existing_notes = redcap_rec.get("upload_notes", "").strip()
+        existing_notes = field(redcap_rec, "upload_notes")
 
         update: Dict[str, Any] = {
             "ptid": ptid,
@@ -198,7 +149,7 @@ def build_finalization_updates(
             )
 
         # Include repeat instance if present (required for repeating events in REDCap)
-        repeat_instance = redcap_rec.get("redcap_repeat_instance", "").strip()
+        repeat_instance = field(redcap_rec, "redcap_repeat_instance")
         if repeat_instance:
             update["redcap_repeat_instance"] = repeat_instance
 
