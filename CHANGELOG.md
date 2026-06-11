@@ -29,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Flywheel upload success confirmation now properly integrated
 
+## [1.1.0] - 2026-06-11
+
+### Added
+
+- **Orchestration contract compliance** (pipeline-orchestrator `STEP_CONTRACT.md` v1):
+  `--result-json` writes a machine-readable step result for every mode (upload,
+  fetch, pull-errors, pull-identifiers, pull-status, packet-finalization,
+  upload-checkout); telemetry consolidated into `src/logger/telemetry.py`
+  (`RunRecorder`) and now written on failure paths with status `failure` for
+  both NU and NR events.
+- `--pull-errors` and `--pull-status` now perform the live Flywheel pulls
+  (reusing the same helpers `--upload-checkout` uses) instead of stub output,
+  so their `errors_csv` / `status_csv` artifacts are real.
+- Upload runs with zero eligible records exit 0 with status `no_op` and skip
+  the Flywheel upload instead of submitting an empty CSV.
+
+### Changed
+
+- Exit codes rationalized: usage/config errors (missing command, conflicting
+  flags, missing `--adcid`/`FW_API_KEY`/SDK, failed center lookup) exit 2;
+  runtime failures exit 1.
+
 ## [0.1.0] - 2026-01-16
 
 ### Added

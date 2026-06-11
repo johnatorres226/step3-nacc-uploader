@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://final-projects.local/schemas/step_result.schema.json",
+  "title": "UDSv4 Step Result",
+  "description": "Machine-readable result written by a step CLI when invoked with --result-json. Normative contract: docs/STEP_CONTRACT.md.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "step",
+    "mode",
+    "run_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "duration_s",
+    "artifacts",
+    "metrics",
+    "error"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "step": {
+      "type": "string",
+      "enum": ["qc-validator", "qc-uploader", "nacc-uploader"]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "complete-run",
+        "upload",
+        "fetch",
+        "pull-errors",
+        "pull-identifiers",
+        "pull-status",
+        "packet-finalization",
+        "upload-checkout"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The step's own timestamp identifier; matches the run_id in its telemetry log."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "no_op", "failure"]
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "duration_s": { "type": "number", "minimum": 0 },
+    "artifacts": {
+      "type": "object",
+      "description": "Logical name -> absolute path for every output another component consumes.",
+      "additionalProperties": { "type": "string", "minLength": 3 }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Counts mirroring the step's telemetry payload.",
+      "additionalProperties": { "type": ["number", "string", "boolean", "null"] }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["type", "message", "category"],
+          "properties": {
+            "type": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" },
+            "category": {
+              "type": "string",
+              "enum": ["network", "data", "config", "unknown"]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "failure" } } },
+      "then": { "properties": { "error": { "type": "object" } } }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["success", "no_op"] } } },
+      "then": { "properties": { "error": { "type": "null" } } }
+    }
+  ],
+  "additionalProperties": false
+}

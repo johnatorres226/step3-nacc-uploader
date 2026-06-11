@@ -6,6 +6,7 @@ Flywheel with comprehensive logging and status tracking.
 Based on code from https://github.com/naccdata/data-platform-demos
 """
 
+import csv as csv_module
 import json
 import sys
 import os
@@ -32,50 +33,31 @@ except ImportError as e:
     # Modules will be created later, this is expected initially
     pass
 
+from src.logger.telemetry import RunRecorder, classify_error
+
 # Load environment variables
 load_dotenv()
 
 # Global constants
-CLI_VERSION = "1.0.0"
+CLI_VERSION = "1.1.0"
 DEFAULT_OUTPUT_DIR = Path.cwd()
-
-_TELEMETRY_DIR = Path(
-    os.getenv("TELEMETRY_PATH") or str(Path(__file__).parent.parent.parent / "telemetry")
-).resolve()
-_TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
 
 """
 CLI Commands Reference
 
 This module exposes the following top-level CLI commands via Click:
 
-- upload
-    - Runs the end-to-end upload pipeline by default.
-    - Key options:
-        - --initials (required): User initials for logging and REDCap variables.
-        - --pipeline: 'sandbox' or 'ingest' (default: ingest).
-        - --adcid (required): Integer ADRC site ID.
-        - --datatype: 'dicom', 'enrollment', or 'form' (default: form).
-        - --ptid: Single or comma-separated record IDs (default: all eligible records).
+- upload (default with -i/--initials)
+- fetch (--fetch)
+- pull-errors / pull-identifiers / pull-status (--pull-*)
+- packet-finalization (--packet-finalization)
+- upload-checkout (--upload-checkout)
 
-- fetch
-    - Pulls REDCap data (report-level) and produces the final dataset for upload.
-    - Output convention: REDCAP_NACC_UPLOAD_REPORT_{DDMMMYYYY}-{HHMMSS}.csv
-
-- pull-errors
-    - Pulls pipeline file errors and writes results to a time-stamped output folder.
-
-- pull-identifiers  
-    - Pulls enrollment identifiers and saves them to a time-stamped output folder.
-
-- pull-status
-    - Pulls QC status information and saves output to a time-stamped folder.
-
-- packet-finalization
-    - Handles packet finalization workflow.
-
-All commands create time-stamped subfolders under the output directory following the convention:
-NACC_{COMMAND}_{DDMMMYYYY}-{HHMMSS}/
+All commands create time-stamped subfolders under the output directory following
+the convention NACC_{COMMAND}_{DDMMMYYYY}-{HHMMSS}/. Every command accepts
+--result-json to write the orchestration contract result document
+(pipeline-orchestrator/docs/STEP_CONTRACT.md); exit codes are 0 success/no-op,
+1 runtime failure, 2 config/usage error.
 """
 
 
@@ -109,10 +91,12 @@ def get_datestamp():
 @click.option('--ptid', help='Record ID(s) - single value or comma-separated list (default: all records)')
 @click.option('--output', type=click.Path(), default=str(DEFAULT_OUTPUT_DIR / 'output'),
               help='Output directory for logs and data files')
+@click.option('--result-json', 'result_json', type=click.Path(), default=None,
+              help='Write a machine-readable step result (orchestration contract) to this path')
 @click.pass_context
 def cli(ctx, initials, fetch, pull_errors, pull_identifiers, pull_status,
         packet_finalization, upload_checkout, errors_csv, status_csv, redcap_csv,
-        pipeline, adcid, datatype, ptid, output):
+        pipeline, adcid, datatype, ptid, output, result_json):
     """UDSv4-NU (NACC Uploader) - Windows-first tool for NACC Data Platform operations.
 
     This tool handles data fetching from REDCap, processing, and uploading to Flywheel
@@ -145,23 +129,17 @@ def cli(ctx, initials, fetch, pull_errors, pull_identifiers, pull_status,
     commands = [fetch, pull_errors, pull_identifiers, pull_status, packet_finalization, upload_checkout]
     command_count = sum(bool(cmd) for cmd in commands)
 
-    # If initials provided and no other command, default to upload workflow
-    if initials and command_count == 0:
-        # Default behavior: run upload workflow
-        pass  # Will be handled below
-    elif initials and upload_checkout:
-        # --upload-checkout accepts -i for REDCap notes; allowed combination
-        pass
-    elif command_count == 0 and not initials:
+    # Usage errors before a mode is determined: no result document possible (exit 2)
+    if command_count == 0 and not initials:
         click.echo("Error: No command specified. Use -i with initials for upload, or use --fetch, --pull-*, --packet-finalization, or --upload-checkout.", err=True)
         click.echo("Run 'udsv4-nu --help' for usage information.", err=True)
-        sys.exit(1)
+        sys.exit(2)
     elif command_count > 1:
         click.echo("Error: Only one command can be specified at a time.", err=True)
-        sys.exit(1)
+        sys.exit(2)
     elif command_count > 0 and initials and not upload_checkout:
         click.echo("Error: Cannot combine -i/--initials with other commands.", err=True)
-        sys.exit(1)
+        sys.exit(2)
 
     # Default adcid to PROJECT_ID env var if not specified
     if not adcid:
@@ -169,9 +147,15 @@ def cli(ctx, initials, fetch, pull_errors, pull_identifiers, pull_status,
         if adcid:
             adcid = int(adcid)
 
+    user = initials or ""
+    fw_payload = {"pipeline": pipeline, "adcid": adcid, "datatype": datatype}
+
     # Handle commands
     if upload_checkout:
+        recorder = RunRecorder(mode="upload-checkout", event_type="NR", user=user or "UNK",
+                               result_json=result_json)
         _handle_upload_checkout(
+            recorder,
             initials=initials or "UNK",
             errors_csv_path=Path(errors_csv) if errors_csv else None,
             status_csv_path=Path(status_csv) if status_csv else None,
@@ -183,10 +167,13 @@ def cli(ctx, initials, fetch, pull_errors, pull_identifiers, pull_status,
         )
 
     elif initials:
-        # Validate upload command requirements
+        recorder = RunRecorder(mode="upload", event_type="NU", user=user,
+                               result_json=result_json, base_payload=fw_payload)
         if not adcid:
             click.echo("Error: --adcid is required or PROJECT_ID must be set in .env", err=True)
-            sys.exit(1)
+            recorder.failure(error_type="ConfigurationError",
+                             message="--adcid is required or PROJECT_ID must be set in .env",
+                             category="config", exit_code=2)
 
         # Handle record selection logic - defaults to all records
         ptids = []
@@ -195,38 +182,85 @@ def cli(ctx, initials, fetch, pull_errors, pull_identifiers, pull_status,
             ptids = [p.strip() for p in ptid.split(',')]
         # If not specified, defaults to all eligible records (empty list)
 
-        _handle_fwu(initials, pipeline, adcid, datatype, ptids, output)
+        _handle_fwu(recorder, initials, pipeline, adcid, datatype, ptids, output)
 
     elif fetch:
-        _handle_fetch(output)
+        recorder = RunRecorder(mode="fetch", event_type="NR", user=user, result_json=result_json)
+        _handle_fetch(recorder, output)
 
     elif pull_errors:
+        recorder = RunRecorder(mode="pull-errors", event_type="NR", user=user,
+                               result_json=result_json, base_payload=fw_payload)
         if not adcid:
             click.echo("Error: --adcid is required for --pull-errors command", err=True)
-            sys.exit(1)
-        _handle_pull_errors(adcid, datatype, pipeline, output)
+            recorder.failure(error_type="ConfigurationError",
+                             message="--adcid is required for --pull-errors",
+                             category="config", exit_code=2)
+        _handle_pull_errors(recorder, adcid, datatype, pipeline, output)
 
     elif pull_identifiers:
+        recorder = RunRecorder(mode="pull-identifiers", event_type="NR", user=user,
+                               result_json=result_json, base_payload={"pipeline": pipeline, "adcid": adcid})
         if not adcid:
             click.echo("Error: --adcid is required for --pull-identifiers command", err=True)
-            sys.exit(1)
-        _handle_pull_identifiers(adcid, pipeline, output)
+            recorder.failure(error_type="ConfigurationError",
+                             message="--adcid is required for --pull-identifiers",
+                             category="config", exit_code=2)
+        _handle_pull_identifiers(recorder, adcid, pipeline, output)
 
     elif pull_status:
+        recorder = RunRecorder(mode="pull-status", event_type="NR", user=user,
+                               result_json=result_json, base_payload=fw_payload)
         if not adcid:
             click.echo("Error: --adcid is required for --pull-status command", err=True)
-            sys.exit(1)
-        _handle_pull_status(adcid, datatype, pipeline, output)
+            recorder.failure(error_type="ConfigurationError",
+                             message="--adcid is required for --pull-status",
+                             category="config", exit_code=2)
+        _handle_pull_status(recorder, adcid, datatype, pipeline, output)
 
     elif packet_finalization:
-        _handle_packet_finalization(output)
+        recorder = RunRecorder(mode="packet-finalization", event_type="NR", user=user,
+                               result_json=result_json)
+        _handle_packet_finalization(recorder, output)
+
+
+def _resolve_fw_client_group(recorder, adcid):
+    """Resolve the Flywheel client and center group for an ADCID.
+
+    Exits via the recorder (config category) on missing SDK, missing API key,
+    or failed center lookup.
+    """
+    try:
+        from flywheel import Client
+        from nacc_common.center_info import get_center_id, CenterError
+    except ImportError:
+        click.echo("Error: Flywheel SDK not available. Install with --extras flywheel.", err=True)
+        recorder.failure(error_type="ImportError",
+                         message="Flywheel SDK not available (install with --extras flywheel)",
+                         category="config", exit_code=2)
+
+    if "FW_API_KEY" not in os.environ:
+        click.echo("Error: FW_API_KEY environment variable not found", err=True)
+        recorder.failure(error_type="ConfigurationError",
+                         message="FW_API_KEY environment variable not found",
+                         category="config", exit_code=2)
+
+    client = Client(os.environ["FW_API_KEY"])
+    try:
+        group_id = get_center_id(client=client, adcid=str(adcid))
+    except CenterError as e:
+        click.echo(f"Error: Center lookup failed for adcid={adcid}: {e}", err=True)
+        recorder.failure(error_type="CenterError",
+                         message=f"Center lookup failed for adcid={adcid}: {e}",
+                         category="config", exit_code=2)
+    return client, group_id
 
 
 def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
     """Handle the upload command workflow."""
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Setup logging
     try:
         logger = setup_logging(initials, output_path)
@@ -239,7 +273,7 @@ def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
     except NameError:
         click.echo("Warning: Logging module not yet implemented", err=True)
         logger = None
-    
+
     try:
         # Fetch data from REDCap
         click.echo(f"Fetching REDCap data...")
@@ -249,7 +283,7 @@ def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
         except NameError:
             click.echo("Error: REDCap fetcher not yet implemented", err=True)
             sys.exit(1)
-        
+
         # Process data
         click.echo("Processing data...")
         try:
@@ -258,7 +292,7 @@ def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
         except NameError:
             click.echo("Error: Data processor not yet implemented", err=True)
             sys.exit(1)
-        
+
         # Upload to Flywheel
         click.echo(f"Uploading to Flywheel (pipeline: {pipeline})...")
         try:
@@ -267,19 +301,12 @@ def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
         except NameError:
             click.echo("Error: Flywheel uploader not yet implemented", err=True)
             sys.exit(1)
-        
-        # Upload status to REDCap
-        click.echo("Uploading status to REDCap...")
-        try:
-            redcap_result = upload_to_redcap(json_path)
-            click.echo(f"REDCap upload completed: {redcap_result}")
-        except NameError:
-            click.echo("Warning: REDCap uploader not yet implemented", err=True)
-        
+        # REDCap status is NOT updated here — run --upload-checkout after QC review
+
         if logger:
             log_operation(logger, "upload_complete", {"success": True})
         click.echo("Upload operation completed successfully!")
-        
+
     except Exception as e:
         if logger:
             log_operation(logger, "upload_error", {"error": str(e)})
@@ -287,11 +314,10 @@ def _handle_upload(initials, pipeline, adcid, datatype, ptids, output):
         sys.exit(1)
 
 
-def _handle_fwu(initials, pipeline, adcid, datatype, ptids, output):
+def _handle_fwu(recorder, initials, pipeline, adcid, datatype, ptids, output):
     """Handle the direct Flywheel upload command via API."""
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     # Setup logging
     try:
@@ -305,360 +331,198 @@ def _handle_fwu(initials, pipeline, adcid, datatype, ptids, output):
     except NameError:
         click.echo("Warning: Logging module not yet implemented", err=True)
         logger = None
-    
+
+    # Create the run folder once so both the raw fetch CSV and all processed
+    # artifacts land in the same NACC_UPLOAD_{stamp} directory.
+    _run_now = datetime.now()
+    _run_datestamp = _run_now.strftime("%d%b%Y").upper()
+    _run_timestamp = _run_now.strftime("%H%M%S")
+    run_dir = output_path / f"NACC_UPLOAD_{_run_datestamp}-{_run_timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        # Fetch data from REDCap
+        # Fetch data from REDCap into the run folder
         click.echo(f"Fetching REDCap data...")
         try:
-            raw_data_path = fetch_redcap_report(ptids, output_path)
+            raw_data_path = fetch_redcap_report(ptids, run_dir)
             click.echo(f"Data fetched: {raw_data_path}")
         except NameError:
             click.echo("Error: REDCap fetcher not yet implemented", err=True)
-            sys.exit(1)
-        
-        # Process data
+            recorder.failure(error_type="ImportError", message="REDCap fetcher not available",
+                             category="config", exit_code=2)
+
+        # Process data into the same run folder
         click.echo("Processing data...")
         try:
-            csv_path, json_path = process_data(raw_data_path, initials, output_path)
-            import csv as _csv_mod
+            csv_path, json_path = process_data(raw_data_path, initials, output_path, run_dir=run_dir)
             with open(csv_path, newline="", encoding="utf-8") as _f:
-                _records_count = sum(1 for _ in _csv_mod.reader(_f)) - 1  # subtract header
+                _records_count = sum(1 for _ in csv_module.reader(_f)) - 1  # subtract header
             click.echo(f"Data processed: {_records_count} records -> CSV={csv_path}")
         except NameError:
             click.echo("Error: Data processor not yet implemented", err=True)
-            sys.exit(1)
-        
+            recorder.failure(error_type="ImportError", message="Data processor not available",
+                             category="config", exit_code=2)
+
+        if _records_count == 0:
+            click.echo("No eligible records to upload - skipping Flywheel upload.")
+            if logger:
+                log_operation(logger, "fwu_complete", {"success": True, "records": 0})
+            recorder.success(
+                no_op=True,
+                metrics={"records_uploaded": 0, "pipeline": pipeline, "adcid": adcid, "datatype": datatype},
+            )
+            return
+
         # Upload directly to Flywheel via API
         click.echo(f"Uploading to Flywheel via API (pipeline: {pipeline})...")
         try:
-            from src.redcap_data.uploader import upload_to_flywheel_api, upload_to_redcap
+            from src.redcap_data.uploader import upload_to_flywheel_api
             upload_result = upload_to_flywheel_api(csv_path, adcid, datatype, pipeline)
             click.echo(f"Flywheel API upload completed: {upload_result}")
-            
-            # Update REDCap status after successful Flywheel upload
-            if upload_result.get('success'):
-                click.echo("Updating REDCap status...")
-                try:
-                    redcap_status_result = upload_to_redcap(json_path)
-                    if redcap_status_result.get('success'):
-                        click.echo(f"✓ REDCap status updated: {redcap_status_result.get('records_updated', 0)} records")
-                    else:
-                        click.echo(f"Warning: REDCap status update failed: {redcap_status_result.get('error', 'Unknown error')}", err=True)
-                except Exception as e:
-                    click.echo(f"Warning: Failed to update REDCap status: {e}", err=True)
+            # REDCap status is NOT updated here — run --upload-checkout after QC review
         except ImportError:
             click.echo("Error: Flywheel API uploader not available", err=True)
-            sys.exit(1)
-        
+            recorder.failure(error_type="ImportError", message="Flywheel API uploader not available",
+                             category="config", exit_code=2)
+
         if logger:
             log_operation(logger, "fwu_complete", {"success": True})
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NU_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NU",
-                "user": initials,
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "records_uploaded": _records_count,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+
+        artifacts = {"output_dir": run_dir, "uds_csv": csv_path, "redcap_status_json": json_path}
+        ready_records = sorted(run_dir.glob("NACC_READYRECORDS_*.csv"))
+        if ready_records:
+            artifacts["ready_records_csv"] = ready_records[-1]
+        recorder.success(
+            artifacts=artifacts,
+            metrics={"records_uploaded": _records_count, "pipeline": pipeline,
+                     "adcid": adcid, "datatype": datatype},
+        )
         click.echo("Direct upload operation completed successfully!")
 
+    except SystemExit:
+        raise
     except Exception as e:
         if logger:
             log_operation(logger, "fwu_error", {"error": str(e)})
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NU_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NU",
-                "user": initials,
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {
-                    "records_uploaded": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                },
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error during direct upload: {e}", err=True)
-        sys.exit(1)
+        recorder.failure(error_type=type(e).__name__, message=str(e),
+                         category=classify_error(e),
+                         payload={"records_uploaded": 0})
 
 
-def _handle_fetch(output):
+def _handle_fetch(recorder, output):
     """Handle the fetch command."""
     output_path = Path(output)
-    timestamp = get_timestamp()
-    datestamp = get_datestamp()
-    
     output_path.mkdir(parents=True, exist_ok=True)
     click.echo("Fetching REDCap data...")
     try:
         report_path = fetch_redcap_report([], output_path)
         click.echo(f"REDCap data fetched and saved to: {report_path}")
+        recorder.success(
+            artifacts={"redcap_report_csv": report_path},
+            metrics={"operation": "fetch"},
+        )
     except NameError:
         click.echo("Error: REDCap fetcher not yet implemented", err=True)
-        sys.exit(1)
+        recorder.failure(error_type="ImportError", message="REDCap fetcher not available",
+                         category="config", exit_code=2)
     except Exception as e:
         click.echo(f"Error fetching data: {e}", err=True)
-        sys.exit(1)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e))
 
 
-def _handle_pull_errors(adcid, datatype, pipeline, output):
-    """Handle the pull-errors command."""
+def _handle_pull_errors(recorder, adcid, datatype, pipeline, output):
+    """Handle the pull-errors command: pull live pipeline file errors from Flywheel."""
     output_path = Path(output)
-    timestamp = get_timestamp()
-    datestamp = get_datestamp()
-    subfolder = output_path / f"NACC_ERRORS_{datestamp}-{timestamp}"
+    subfolder = output_path / f"NACC_ERRORS_{get_datestamp()}-{get_timestamp()}"
     subfolder.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     click.echo(f"Pulling errors for ADCID {adcid}...")
     click.echo(f"Output directory: {subfolder}")
 
-    original_cwd = os.getcwd()
+    client, group_id = _resolve_fw_client_group(recorder, adcid)
     try:
-        os.chdir(str(subfolder))
-        click.echo("Error pulling functionality will be implemented here")
-        click.echo("This preserves the existing demo/pull_errors behavior")
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                    "operation": "pull_errors",
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+        errors_csv = _pull_fw_errors_to_dir(client, group_id, datatype, pipeline, "adrc", subfolder)
+        recorder.success(
+            artifacts={"errors_csv": errors_csv},
+            metrics={"operation": "pull-errors", "pipeline": pipeline, "adcid": adcid,
+                     "datatype": datatype},
+            payload={"records_finalized": 0, "pipeline": pipeline, "adcid": adcid,
+                     "datatype": datatype, "operation": "pull_errors"},
+        )
     except Exception as e:
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                    "operation": "pull_errors",
-                },
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error pulling errors: {e}", err=True)
-        sys.exit(1)
-    finally:
-        os.chdir(original_cwd)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e),
+                         payload={"operation": "pull_errors"})
 
 
-def _handle_pull_identifiers(adcid, pipeline, output):
-    """Handle the pull-identifiers command."""
+def _handle_pull_identifiers(recorder, adcid, pipeline, output):
+    """Handle the pull-identifiers command (not yet wired to a live pull)."""
     output_path = Path(output)
-    timestamp = get_timestamp()
-    datestamp = get_datestamp()
-    subfolder = output_path / f"NACC_IDENTIFIERS_{datestamp}-{timestamp}"
+    subfolder = output_path / f"NACC_IDENTIFIERS_{get_datestamp()}-{get_timestamp()}"
     subfolder.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     click.echo(f"Pulling identifiers for ADCID {adcid}...")
     click.echo(f"Output directory: {subfolder}")
 
-    original_cwd = os.getcwd()
     try:
-        os.chdir(str(subfolder))
         click.echo("Identifier pulling functionality will be implemented here")
         click.echo("This preserves the existing demo/pull_identifiers behavior")
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "operation": "pull_identifiers",
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+        recorder.success(
+            metrics={"operation": "pull-identifiers", "pipeline": pipeline, "adcid": adcid},
+            payload={"records_finalized": 0, "pipeline": pipeline, "adcid": adcid,
+                     "operation": "pull_identifiers"},
+        )
     except Exception as e:
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "operation": "pull_identifiers",
-                },
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error pulling identifiers: {e}", err=True)
-        sys.exit(1)
-    finally:
-        os.chdir(original_cwd)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e),
+                         payload={"operation": "pull_identifiers"})
 
 
-def _handle_pull_status(adcid, datatype, pipeline, output):
-    """Handle the pull-status command."""
+def _handle_pull_status(recorder, adcid, datatype, pipeline, output):
+    """Handle the pull-status command: pull live QC status from Flywheel."""
     output_path = Path(output)
-    timestamp = get_timestamp()
-    datestamp = get_datestamp()
-    subfolder = output_path / f"NACC_STATUS_{datestamp}-{timestamp}"
+    subfolder = output_path / f"NACC_STATUS_{get_datestamp()}-{get_timestamp()}"
     subfolder.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     click.echo(f"Pulling status for ADCID {adcid}...")
     click.echo(f"Output directory: {subfolder}")
 
-    original_cwd = os.getcwd()
+    client, group_id = _resolve_fw_client_group(recorder, adcid)
     try:
-        os.chdir(str(subfolder))
-        click.echo("Status pulling functionality will be implemented here")
-        click.echo("This preserves the existing demo/pull_status behavior")
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                    "operation": "pull_status",
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+        status_csv = _pull_fw_status_to_dir(client, group_id, datatype, pipeline, "adrc", subfolder)
+        recorder.success(
+            artifacts={"status_csv": status_csv},
+            metrics={"operation": "pull-status", "pipeline": pipeline, "adcid": adcid,
+                     "datatype": datatype},
+            payload={"records_finalized": 0, "pipeline": pipeline, "adcid": adcid,
+                     "datatype": datatype, "operation": "pull_status"},
+        )
     except Exception as e:
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {
-                    "records_finalized": 0,
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                    "datatype": datatype,
-                    "operation": "pull_status",
-                },
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error pulling status: {e}", err=True)
-        sys.exit(1)
-    finally:
-        os.chdir(original_cwd)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e),
+                         payload={"operation": "pull_status"})
 
 
-def _handle_packet_finalization(output):
-    """Handle the packet-finalization command."""
+def _handle_packet_finalization(recorder, output):
+    """Handle the packet-finalization command (full flow lives in --upload-checkout)."""
     output_path = Path(output)
-    timestamp = get_timestamp()
-    datestamp = get_datestamp()
-    subfolder = output_path / f"NACC_PACKET_FINALIZATION_{datestamp}-{timestamp}"
+    subfolder = output_path / f"NACC_PACKET_FINALIZATION_{get_datestamp()}-{get_timestamp()}"
     subfolder.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     click.echo("Running packet finalization...")
     click.echo(f"Output directory: {subfolder}")
 
     try:
         click.echo("Packet finalization functionality will be implemented here")
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "records_finalized": 0,
-                    "operation": "packet_finalization",
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+        recorder.success(
+            metrics={"operation": "packet-finalization", "records_finalized": 0},
+            payload={"records_finalized": 0, "operation": "packet_finalization"},
+        )
     except Exception as e:
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": "",
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {
-                    "records_finalized": 0,
-                    "operation": "packet_finalization",
-                },
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error during packet finalization: {e}", err=True)
-        sys.exit(1)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e),
+                         payload={"operation": "packet_finalization"})
 
 
 def _find_latest_csv(output_path: Path, folder_prefix: str) -> Path | None:
@@ -750,7 +614,7 @@ def _pull_fw_status_to_dir(client, group_id, datatype, pipeline, studyid, dest_d
     return csv_path
 
 
-def _handle_upload_checkout(initials, errors_csv_path, status_csv_path, redcap_csv_path,
+def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path, redcap_csv_path,
                              adcid, pipeline, datatype, output):
     """Handle the --upload-checkout command.
 
@@ -761,20 +625,15 @@ def _handle_upload_checkout(initials, errors_csv_path, status_csv_path, redcap_c
         fw_status/qc-status-{label}-{date}.csv
         checkout-summary-{date}.csv
         NACC_UPLOAD_CHECKOUT_{stamp}_updates.json
-      telemetry/NU_TELEMETRY_LOG_{stamp}.json
+      telemetry/NR_TELEMETRY_LOG_{stamp}.json
 
     --errors-csv / --status-csv override the live FW pull when provided.
     """
-    import csv as csv_module
-
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
-    started_at = datetime.now()
 
     # Build the checkout output folder up front (fw_errors / fw_status go inside it)
-    datestamp = datetime.now().strftime("%d%b%Y").upper()
-    timestamp = datetime.now().strftime("%H%M%S")
-    stamp = f"{datestamp}-{timestamp}"
+    stamp = f"{get_datestamp()}-{get_timestamp()}"
     checkout_dir = output_path / f"NACC_UPLOAD_CHECKOUT_{stamp}"
     checkout_dir.mkdir(parents=True, exist_ok=True)
 
@@ -782,7 +641,9 @@ def _handle_upload_checkout(initials, errors_csv_path, status_csv_path, redcap_c
         from src.redcap_data.upload_checkout_processor import run_upload_checkout
     except ImportError:
         click.echo("Error: upload_checkout_processor module not available", err=True)
-        sys.exit(1)
+        recorder.failure(error_type="ImportError",
+                         message="upload_checkout_processor module not available",
+                         category="config", exit_code=2)
 
     # ---- Pull errors and status from Flywheel (or use overrides) ----
     if errors_csv_path and status_csv_path:
@@ -791,31 +652,12 @@ def _handle_upload_checkout(initials, errors_csv_path, status_csv_path, redcap_c
     else:
         # Require adcid for live FW pull
         if not adcid:
-            adcid = os.getenv("PROJECT_ID")
-            if adcid:
-                adcid = int(adcid)
-        if not adcid:
             click.echo("Error: --adcid is required for --upload-checkout (or set PROJECT_ID in .env)", err=True)
-            sys.exit(1)
+            recorder.failure(error_type="ConfigurationError",
+                             message="--adcid is required for --upload-checkout (or set PROJECT_ID in .env)",
+                             category="config", exit_code=2)
 
-        try:
-            from flywheel import Client
-            from nacc_common.center_info import get_center_id, CenterError
-        except ImportError:
-            click.echo("Error: Flywheel SDK not available. Install with --extras flywheel or pass --errors-csv/--status-csv.", err=True)
-            sys.exit(1)
-
-        if "FW_API_KEY" not in os.environ:
-            click.echo("Error: FW_API_KEY environment variable not found", err=True)
-            sys.exit(1)
-
-        client = Client(os.environ["FW_API_KEY"])
-        try:
-            group_id = get_center_id(client=client, adcid=str(adcid))
-        except CenterError as e:
-            click.echo(f"Error: Center lookup failed for adcid={adcid}: {e}", err=True)
-            sys.exit(1)
-
+        client, group_id = _resolve_fw_client_group(recorder, adcid)
         click.echo(f"Pulling fresh FW data for adcid={adcid} (group={group_id}, pipeline={pipeline})...")
         errors_csv_path = _pull_fw_errors_to_dir(client, group_id, datatype, pipeline, "adrc", checkout_dir)
         status_csv_path = _pull_fw_status_to_dir(client, group_id, datatype, pipeline, "adrc", checkout_dir)
@@ -882,50 +724,43 @@ def _handle_upload_checkout(initials, errors_csv_path, status_csv_path, redcap_c
             except Exception as e:
                 click.echo(f"  Warning: could not push error notes: {e}", err=True)
 
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": initials,
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "success",
-                "payload": {
-                    "operation": "upload_checkout",
-                    "records_finalized_in_redcap": records_finalized_in_redcap,
-                    "records_error_notes_pushed": records_error_notes_pushed,
-                    "records_skipped_pass": stats.get("records_skipped_pass", 0),
-                    "records_blocked_errors": stats.get("records_blocked_errors", 0),
-                    "total_fw_finalized": stats.get("total_fw_finalized", 0),
-                    "total_errors_in_fw": stats.get("total_errors", 0),
-                    "pipeline": pipeline,
-                    "adcid": adcid,
-                },
-                "error": None,
-            }, _f, indent=2, ensure_ascii=False)
+        artifacts = {
+            "checkout_summary_csv": summary_path,
+            "checkout_updates_json": updates_path,
+            "error_notes_json": error_notes_path,
+            "errors_csv": errors_csv_path,
+            "status_csv": status_csv_path,
+        }
+        recorder.success(
+            artifacts=artifacts,
+            metrics={
+                "operation": "upload-checkout",
+                "records_finalized": records_finalized_in_redcap,
+                "records_blocked_by_errors": stats.get("records_blocked_errors", 0),
+                "pipeline": pipeline,
+                "adcid": adcid,
+            },
+            payload={
+                "operation": "upload_checkout",
+                "records_finalized_in_redcap": records_finalized_in_redcap,
+                "records_error_notes_pushed": records_error_notes_pushed,
+                "records_skipped_pass": stats.get("records_skipped_pass", 0),
+                "records_blocked_errors": stats.get("records_blocked_errors", 0),
+                "total_fw_finalized": stats.get("total_fw_finalized", 0),
+                "total_errors_in_fw": stats.get("total_errors", 0),
+                "pipeline": pipeline,
+                "adcid": adcid,
+            },
+        )
 
         click.echo("Upload checkout complete.")
 
+    except SystemExit:
+        raise
     except Exception as e:
-        _completed_at = datetime.now()
-        with open(_TELEMETRY_DIR / f"NR_TELEMETRY_LOG_{_completed_at.strftime('%d%b%Y-%H%M%S').upper()}.json", "w", encoding="utf-8") as _f:
-            json.dump({
-                "run_id": _completed_at.strftime("%H%M%S"),
-                "step": "nacc-uploader",
-                "event_type": "NR",
-                "user": initials,
-                "started_at": started_at.isoformat(),
-                "completed_at": _completed_at.isoformat(),
-                "duration_s": round((_completed_at - started_at).total_seconds(), 1),
-                "status": "error",
-                "payload": {"operation": "upload_checkout", "pipeline": pipeline, "adcid": adcid},
-                "error": str(e),
-            }, _f, indent=2, ensure_ascii=False)
         click.echo(f"Error during upload checkout: {e}", err=True)
-        sys.exit(1)
+        recorder.failure(error_type=type(e).__name__, message=str(e), category=classify_error(e),
+                         payload={"operation": "upload_checkout", "pipeline": pipeline, "adcid": adcid})
 
 
 def main():
@@ -934,7 +769,7 @@ def main():
     if not os.getenv('FW_API_KEY'):
         click.echo("Warning: FW_API_KEY environment variable not found", err=True)
         click.echo("Please set FW_API_KEY in your .env file or environment", err=True)
-    
+
     cli(obj={})
 
 
