@@ -309,7 +309,11 @@ def _handle_fwu(initials, pipeline, adcid, datatype, ptids, output):
                     if redcap_status_result.get('success'):
                         click.echo(f"✓ REDCap status updated: {redcap_status_result.get('records_updated', 0)} records")
                     else:
-                        click.echo(f"Warning: REDCap status update failed: {redcap_status_result.get('error', 'Unknown error')}", err=True)
+                        click.echo(
+                            "Warning: REDCap status update failed: "
+                            f"{redcap_status_result.get('error') or redcap_status_result.get('message', 'Unknown error')}",
+                            err=True,
+                        )
                 except Exception as e:
                     click.echo(f"Warning: Failed to update REDCap status: {e}", err=True)
         except ImportError:

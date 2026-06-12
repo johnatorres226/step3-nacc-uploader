@@ -193,9 +193,7 @@ def build_finalization_updates(
         if existing_notes:
             update["upload_notes"] = f"{existing_notes}; {new_note}"
         else:
-            logger.debug(
-                "upload_notes not in report for ptid=%s; field left unchanged in REDCap", ptid
-            )
+            update["upload_notes"] = new_note
 
         # Include repeat instance if present (required for repeating events in REDCap)
         repeat_instance = redcap_rec.get("redcap_repeat_instance", "").strip()
