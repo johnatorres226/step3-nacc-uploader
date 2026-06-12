@@ -8,6 +8,7 @@ Based on code from https://github.com/naccdata/data-platform-demos
 
 import sys
 import os
+import json
 from pathlib import Path
 from datetime import datetime
 import click
@@ -434,6 +435,84 @@ def _handle_packet_finalization(output):
     
     # Placeholder for packet finalization logic
     click.echo("Packet finalization functionality will be implemented here")
+
+
+def _handle_upload_checkout(
+    initials,
+    checkout_dir,
+    errors_csv,
+    status_csv,
+    redcap_snapshot_csv,
+    checkout_stats,
+    finalization_json_path=None,
+    error_notes_json_path=None,
+):
+    """Handle checkout upload REDCap pushes and write per-run checkout stats."""
+    checkout_path = Path(checkout_dir)
+    checkout_path.mkdir(parents=True, exist_ok=True)
+
+    queued_for_redcap = int(checkout_stats.get("records_queued_for_redcap", 0) or 0)
+    error_notes_records = int(checkout_stats.get("records_error_notes", 0) or 0)
+
+    finalization_status = "skipped"
+    records_finalized = 0
+    if queued_for_redcap > 0:
+        if finalization_json_path:
+            finalization_result = upload_to_redcap(Path(finalization_json_path))
+            if finalization_result.get("success"):
+                finalization_status = "success"
+                records_finalized = int(
+                    finalization_result.get("records_updated", queued_for_redcap) or 0
+                )
+            else:
+                finalization_status = "failed"
+        else:
+            finalization_status = "failed"
+
+    error_notes_status = "skipped"
+    records_error_notes_pushed = 0
+    if error_notes_records > 0:
+        if error_notes_json_path:
+            error_notes_result = upload_to_redcap(Path(error_notes_json_path))
+            if error_notes_result.get("success"):
+                error_notes_status = "success"
+                records_error_notes_pushed = int(
+                    error_notes_result.get("records_updated", error_notes_records) or 0
+                )
+            else:
+                error_notes_status = "failed"
+        else:
+            error_notes_status = "failed"
+
+    stats_payload = {
+        "run_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "initiated_by": initials,
+        "inputs": {
+            "errors_csv": str(errors_csv),
+            "status_csv": str(status_csv),
+            "redcap_snapshot_csv": str(redcap_snapshot_csv),
+        },
+        "checkout_stats": {
+            "total_fw_finalized": int(checkout_stats.get("total_fw_finalized", 0) or 0),
+            "total_errors_in_fw": int(checkout_stats.get("total_errors_in_fw", 0) or 0),
+            "records_queued_for_redcap": queued_for_redcap,
+            "records_skipped_pass": int(checkout_stats.get("records_skipped_pass", 0) or 0),
+            "records_blocked_errors": int(checkout_stats.get("records_blocked_errors", 0) or 0),
+            "records_error_notes": error_notes_records,
+        },
+        "redcap_push": {
+            "finalization_status": finalization_status,
+            "records_finalized": records_finalized,
+            "error_notes_status": error_notes_status,
+            "records_error_notes_pushed": records_error_notes_pushed,
+        },
+    }
+
+    stats_path = checkout_path / "checkout-run-stats.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(stats_payload, f, indent=2)
+
+    return stats_path
 
 def main():
     """Main entry point for the CLI."""
