@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the invalid `['main-command', '--upload']` to `[]`, which correctly reaches the
   no-command guard and asserts exit code 2.
 
+### Added
+- **`checkout-run-stats.json`** (#5): `--upload-checkout` now writes a
+  `checkout-run-stats.json` file directly into the checkout folder alongside the
+  summary CSV, so each run is self-documenting without having to open telemetry logs.
+
 ## [1.1.0] - 2026-06-11
 
 ### Added

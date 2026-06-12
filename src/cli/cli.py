@@ -688,9 +688,17 @@ def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path
             initials=initials,
             output_dir=checkout_dir,
         )
+        # Write self-documenting run stats to the checkout folder
+        stats_path = checkout_dir / "checkout-run-stats.json"
+        stats_path.write_text(
+            json.dumps({"run_date": datetime.now().isoformat(), **stats}, indent=2),
+            encoding="utf-8",
+        )
+
         click.echo(f"Checkout summary : {summary_path}")
         click.echo(f"Updates JSON     : {updates_path}")
         click.echo(f"Error notes JSON : {error_notes_path}")
+        click.echo(f"Run stats JSON   : {stats_path}")
         click.echo(f"  Queued for REDCap (PASS) : {stats.get('records_queued', 0)}")
         click.echo(f"  Blocked (errors)         : {stats.get('records_blocked_errors', 0)}")
         click.echo(f"  Skipped (PASS, no match) : {stats.get('records_skipped_pass', 0)}")
@@ -728,6 +736,7 @@ def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path
             "checkout_summary_csv": summary_path,
             "checkout_updates_json": updates_path,
             "error_notes_json": error_notes_path,
+            "run_stats_json": stats_path,
             "errors_csv": errors_csv_path,
             "status_csv": status_csv_path,
         }
