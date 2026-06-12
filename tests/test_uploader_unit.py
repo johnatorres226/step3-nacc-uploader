@@ -29,8 +29,8 @@ class FakeProject:
 def fw_mocks(monkeypatch, tmp_path):
     project = FakeProject()
     monkeypatch.setattr(uploader, "FLYWHEEL_AVAILABLE", True)
-    monkeypatch.setattr(uploader, "Client", lambda key: SimpleNamespace(key=key), raising=False)
-    monkeypatch.setattr(uploader, "CenterError", FakeCenterError, raising=False)
+    monkeypatch.setattr(uploader, "Client", lambda key: SimpleNamespace(key=key))
+    monkeypatch.setattr(uploader, "CenterError", FakeCenterError)
     monkeypatch.setattr(
         uploader, "get_center_id", lambda client, adcid: f"group-{adcid}", raising=False
     )

@@ -26,7 +26,6 @@ class TestCLI:
     
     def test_upload_validation(self):
         """Test that upload validates required fields."""
-        # Missing both initials and adcid
-        result = self.runner.invoke(cli, ['main-command', '--upload'])
-        # Should fail with validation error
-        assert result.exit_code != 0
+        result = self.runner.invoke(cli, [])
+        assert result.exit_code == 2
+        assert "No command specified" in result.output

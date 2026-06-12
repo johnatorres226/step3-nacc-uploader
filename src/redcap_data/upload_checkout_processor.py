@@ -146,6 +146,8 @@ def build_checkout_results(
             }
             if existing_notes:
                 update["upload_notes"] = f"{existing_notes}; {new_note}"
+            else:
+                update["upload_notes"] = new_note
             repeat_instance = field(redcap_rec, "redcap_repeat_instance")
             if repeat_instance:
                 update["redcap_repeat_instance"] = repeat_instance
@@ -269,15 +271,18 @@ def run_upload_checkout(
         stats keys: records_queued, records_skipped_pass, records_blocked_errors,
                     total_fw_finalized, total_errors.
     """
-    datestamp = datetime.now().strftime("%d%b%Y").upper()
-    timestamp = datetime.now().strftime("%H%M%S")
-    stamp = f"{datestamp}-{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    folder = output_dir / f"NACC_UPLOAD_CHECKOUT_{stamp}"
-    folder.mkdir(parents=True, exist_ok=True)
+    # Derive stamp from the folder name when it follows the NACC_UPLOAD_CHECKOUT_{stamp}
+    # convention (created by the CLI before calling us); compute a fresh one as fallback.
+    folder_name = output_dir.name
+    if folder_name.startswith("NACC_UPLOAD_CHECKOUT_"):
+        stamp = folder_name[len("NACC_UPLOAD_CHECKOUT_"):]
+    else:
+        stamp = f"{datetime.now().strftime('%d%b%Y').upper()}-{datetime.now().strftime('%H%M%S')}"
 
-    summary_path = folder / f"checkout-summary-{today_iso()}.csv"
-    updates_path = folder / f"NACC_UPLOAD_CHECKOUT_{stamp}_updates.json"
+    summary_path = output_dir / f"checkout-summary-{today_iso()}.csv"
+    updates_path = output_dir / f"NACC_UPLOAD_CHECKOUT_{stamp}_updates.json"
 
     error_counts = parse_error_counts(errors_csv_path)
     fw_finalized = parse_fw_finalized(status_csv_path)
@@ -286,7 +291,7 @@ def run_upload_checkout(
         fw_finalized, error_counts, redcap_records, initials
     )
 
-    error_notes_path = folder / f"NACC_UPLOAD_CHECKOUT_{stamp}_error_notes.json"
+    error_notes_path = output_dir / f"NACC_UPLOAD_CHECKOUT_{stamp}_error_notes.json"
 
     stats: Dict[str, int] = {
         "records_queued": len(update_records),

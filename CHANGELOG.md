@@ -7,27 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- REDCap status update integration: automatically update record status in REDCap after successful Flywheel upload
-- REDCap locking API integration for packet finalization workflow
-- Documentation for redcap-locking-api-master feature to lock UDS-related events once records are finalized
-- Default site ID from PROJECT_ID environment variable
-- Default pipeline set to 'ingest' and datatype to 'form'
-- **Ultra-simplified CLI**: `poetry run udsv4-nu -i JDT` for complete upload workflow
-  - `-i` flag now accepts initials directly (no `--initials` needed)
-  - Providing initials automatically triggers upload workflow
-  - No command flags needed for default upload behavior
-
-### Changed
-- Restructured project: renamed `demo/` directory to `src/`
-- Moved `cli/` directory into `src/` for better organization
-- CLI now uses single-command structure (removed subcommands)
-- **BREAKING**: `-i` changed from `--ingest` flag to `--initials` shorthand
-- **BREAKING**: Removed `--upload` and `--fwu` flags - use `-i` with initials instead
-- Simplified command invocation: `udsv4-nu -i JDT` instead of `udsv4-nu --fwu --initials JDT`
+## [1.1.1] - 2026-06-12
 
 ### Fixed
-- Flywheel upload success confirmation now properly integrated
+- **`--upload-checkout` double-folder split** (#1): `run_upload_checkout` now writes
+  all artifacts (checkout summary, updates JSON, error-notes JSON) into the same
+  `NACC_UPLOAD_CHECKOUT_{stamp}` folder that the CLI created for FW pulls, instead
+  of creating a second, differently-stamped sibling folder.
+- **Silent checkout note drop** (#3): PASS records with no prior `upload_notes` now
+  receive the checkout note (`[DATE] Upload checkout PASS | Processed by {initials}`)
+  instead of silently omitting the `upload_notes` key from the REDCap update payload.
+- **Error message always "unknown" on credential failure** (#3): CLI warning for a
+  failed finalization or error-notes push now reads `result["message"]` (the key
+  `upload_to_redcap` actually returns) instead of the non-existent `result["error"]`.
+- **Flywheel test fixture silently broken without extras** (#5): Added module-level
+  `None` sentinels (`Client`, `get_center_id`, `CenterError`, `get_project`) in
+  `uploader.py` when flywheel extras are absent, so `monkeypatch.setattr` no longer
+  silently no-ops and test setup failures surface immediately.
+- **`test_upload_validation` never exercised app logic**: Fixed test invocation from
+  the invalid `['main-command', '--upload']` to `[]`, which correctly reaches the
+  no-command guard and asserts exit code 2.
 
 ## [1.1.0] - 2026-06-11
 

@@ -24,6 +24,10 @@ try:
 except ImportError as e:
     logging.warning(f"Flywheel dependencies not available: {e}")
     FLYWHEEL_AVAILABLE = False
+    Client = None  # type: ignore[assignment,misc]
+    get_center_id = None  # type: ignore[assignment]
+    CenterError = Exception  # type: ignore[assignment,misc]
+    get_project = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 [project]
 name = "udsv4-nacc-uploader"
-version = "1.1.0"
+version = "1.1.1"
 description = "UDSv4 NACC Uploader - Windows-first tool for uploading data to NACC Data Platform"
 readme = "README.md"
 license = "MPL-2.0"

@@ -39,7 +39,7 @@ from src.logger.telemetry import RunRecorder, classify_error
 load_dotenv()
 
 # Global constants
-CLI_VERSION = "1.1.0"
+CLI_VERSION = "1.1.1"
 DEFAULT_OUTPUT_DIR = Path.cwd()
 
 """
@@ -686,7 +686,7 @@ def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path
             status_csv_path=status_csv_path,
             redcap_records=redcap_records,
             initials=initials,
-            output_dir=output_path,
+            output_dir=checkout_dir,
         )
         click.echo(f"Checkout summary : {summary_path}")
         click.echo(f"Updates JSON     : {updates_path}")
@@ -706,7 +706,7 @@ def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path
                     records_finalized_in_redcap = result.get("records_updated", 0)
                     click.echo(f"  Finalized: {records_finalized_in_redcap} records (nacc_finalization_status=1)")
                 else:
-                    click.echo(f"  Warning: finalization push failed: {result.get('error', 'unknown')}", err=True)
+                    click.echo(f"  Warning: finalization push failed: {result.get('message', 'unknown')}", err=True)
             except Exception as e:
                 click.echo(f"  Warning: could not push finalization: {e}", err=True)
 
@@ -720,7 +720,7 @@ def _handle_upload_checkout(recorder, initials, errors_csv_path, status_csv_path
                     records_error_notes_pushed = result.get("records_updated", 0)
                     click.echo(f"  Error notes written: {records_error_notes_pushed} records")
                 else:
-                    click.echo(f"  Warning: error notes push failed: {result.get('error', 'unknown')}", err=True)
+                    click.echo(f"  Warning: error notes push failed: {result.get('message', 'unknown')}", err=True)
             except Exception as e:
                 click.echo(f"  Warning: could not push error notes: {e}", err=True)
 
